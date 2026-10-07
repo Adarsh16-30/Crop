@@ -1,0 +1,70 @@
+version: "3.9"
+
+services:
+  # ────────────────────────────────────────────
+  # InfluxDB 2.x — Time-series database
+  # ────────────────────────────────────────────
+  influxdb:
+    image: influxdb:2.7
+    container_name: crop-influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=cropdetection2024
+      - DOCKER_INFLUXDB_INIT_ORG=crop-org
+      - DOCKER_INFLUXDB_INIT_BUCKET=crop_data
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=crop-disease-detection-token
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ────────────────────────────────────────────
+  # Grafana OSS — Dashboard & visualization
+  # ────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana-oss:10.4.0
+    container_name: crop-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=cropdetection
+      - GF_INSTALL_PLUGINS=
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./src/dashboard/grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./src/dashboard/grafana/dashboards:/etc/grafana/provisioning/dashboards
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────
+  # Eclipse Mosquitto — MQTT broker
+  # ────────────────────────────────────────────
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: crop-mosquitto
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    restart: unless-stopped
+
+volumes:
+  influxdb_data:
+  influxdb_config:
+  grafana_data:
+  mosquitto_data:
+  mosquitto_log:

@@ -1,0 +1,56 @@
+# ============================================================
+# Quantum-Enhanced Crop Disease Detection System
+# Python 3.14.2 | CUDA GPU Support
+# ============================================================
+
+# --- Core ---
+numpy>=1.26.0
+pandas>=2.2.0
+scipy>=1.12.0
+
+# --- ML / Deep Learning (CUDA) ---
+# Install PyTorch with CUDA separately if needed:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch>=2.2.0
+torchvision>=0.17.0
+scikit-learn>=1.4.0
+xgboost>=2.0.0
+joblib>=1.3.0
+
+# --- Quantum Computing ---
+# NOTE: If qiskit fails on Python 3.14, use the pure-Python fallback in src/quantum/
+qiskit>=1.0.0
+qiskit-optimization>=0.6.0
+qiskit-algorithms>=0.3.0
+dwave-neal>=0.6.0
+
+# --- Spectral / Image Processing ---
+opencv-python>=4.9.0
+
+# --- Geo-Spatial ---
+geopandas>=0.14.0
+folium>=0.15.0
+shapely>=2.0.0
+
+# --- Visualization ---
+matplotlib>=3.8.0
+seaborn>=0.13.0
+plotly>=5.18.0
+
+# --- Dashboard / API ---
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+influxdb-client>=1.40.0
+
+# --- MQTT ---
+paho-mqtt>=2.0.0
+
+# --- Notebooks ---
+jupyter>=1.0.0
+ipykernel>=6.29.0
+nbformat>=5.9.0
+
+# --- Testing ---
+pytest>=8.0.0
+pytest-cov>=4.1.0
+httpx>=0.27.0  # For FastAPI TestClient

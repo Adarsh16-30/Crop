@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    jsonData:
+      version: Flux
+      organization: crop-org
+      defaultBucket: crop_data
+      tlsSkipVerify: true
+    secureJsonData:
+      token: crop-disease-detection-token
+    isDefault: true
+    editable: true
