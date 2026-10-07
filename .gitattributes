@@ -1,0 +1,4 @@
+# Shell scripts and container config must keep LF line endings
+*.sh text eol=lf
+config/mosquitto.conf text eol=lf
+config/mosquitto.acl text eol=lf
