@@ -1,37 +1,73 @@
 """
-Quantum Feature Selection Integration
-=======================================
-Orchestrates the full QUBO-based feature selection workflow:
-
-1. Load trained Random Forest → extract feature importances
-2. Build correlation matrix from training data
-3. Construct QUBO problem
-4. Solve via simulated annealing (or QAOA)
-5. Re-train models on selected feature subset
-6. Compare accuracy: full features vs QUBO-selected
-7. Save results
+Quantum-Inspired Feature Selection Integration
+================================================
+1. Relevance = feature importances of a Random Forest trained on TRAIN only
+2. Redundancy = |correlation| between aggregated features on TRAIN only
+3. Build a QUBO with a built-in "select exactly K" penalty
+4. Solve with simulated annealing (optionally QAOA on a pre-filtered
+   sub-problem small enough for a statevector simulator)
+5. Compare against non-quantum baselines that pick the same K:
+   all features, top-K by importance, greedy mRMR, random K
+   using 5-fold CV on the training set AND the held-out test set
+6. Save the RF trained on the QUBO subset so the selection is actually used
 """
 
-import os
 import json
+import logging
+import os
 
 import numpy as np
 import pandas as pd
+from sklearn.feature_selection import mutual_info_classif
+from sklearn.metrics import accuracy_score, f1_score
 
+from src.models.classical_models import (
+    cross_validate,
+    make_random_forest,
+    save_model,
+    train_random_forest,
+)
+from src.quantum.annealing_optimizer import get_solver_info, run_qaoa, run_simulated_annealing
 from src.quantum.qubo_feature_selector import (
-    compute_relevance_scores,
-    compute_correlation_matrix,
+    QISKIT_AVAILABLE,
     build_qubo_matrix,
     build_qubo_problem,
+    compute_correlation_matrix,
+    compute_relevance_scores,
     interpret_qubo_result,
-    QISKIT_AVAILABLE
 )
-from src.quantum.annealing_optimizer import (
-    run_simulated_annealing,
-    run_qaoa,
-    get_solver_info
-)
-from src.features.spectral_indices import get_feature_columns
+
+logger = logging.getLogger(__name__)
+
+QAOA_MAX_CANDIDATES = 12
+
+
+def select_top_k(relevance: np.ndarray, k: int) -> list[int]:
+    return sorted(np.argsort(relevance)[::-1][:k].tolist())
+
+
+def select_mrmr(X: np.ndarray, y: np.ndarray, k: int, seed: int = 42) -> list[int]:
+    """Greedy mRMR: maximize MI(feature, label) - mean |corr| with already-selected."""
+    mi = mutual_info_classif(X, y, random_state=seed)
+    corr = compute_correlation_matrix(X)
+    selected = [int(np.argmax(mi))]
+    while len(selected) < k:
+        remaining = [i for i in range(X.shape[1]) if i not in selected]
+        scores = [mi[i] - corr[i, selected].mean() for i in remaining]
+        selected.append(remaining[int(np.argmax(scores))])
+    return sorted(selected)
+
+
+def _score_subset(name, idx, X_train, y_train, X_test, y_test, seed) -> dict:
+    cv = cross_validate(make_random_forest(seed=seed), X_train[:, idx], y_train, seed=seed)
+    model = train_random_forest(X_train[:, idx], y_train, seed=seed)
+    pred = model.predict(X_test[:, idx])
+    return {
+        'method': name, 'n_features': len(idx),
+        **cv,
+        'test_accuracy': accuracy_score(y_test, pred),
+        'test_f1_macro': f1_score(y_test, pred, average='macro', zero_division=0),
+    }
 
 
 def run_quantum_feature_selection(
@@ -41,183 +77,106 @@ def run_quantum_feature_selection(
     X_test_agg: np.ndarray,
     y_test_agg: np.ndarray,
     feature_names: list[str] | None = None,
-    max_features: int = 6,
+    max_features: int = 8,
     lambda_penalty: float = 0.3,
     correlation_threshold: float = 0.7,
     use_qaoa: bool = False,
-    reports_dir: str = 'reports'
+    reports_dir: str = 'reports',
+    model_dir: str = 'models/checkpoints',
+    seed: int = 42,
+    n_random_draws: int = 10
 ) -> dict:
     """
-    Full quantum feature selection pipeline.
+    Run QUBO feature selection and benchmark it against classical selectors.
 
-    Parameters
-    ----------
-    rf_model : RandomForestClassifier
-        Trained RF model for feature importance extraction.
-    X_train_agg : np.ndarray
-        Aggregated training features.
-    y_train_agg : np.ndarray
-        Training labels.
-    X_test_agg : np.ndarray
-        Aggregated test features.
-    y_test_agg : np.ndarray
-        Test labels.
-    feature_names : list[str] or None
-        Feature names. If None, generates generic names.
-    max_features : int
-        Maximum features to select.
-    lambda_penalty : float
-        QUBO correlation penalty weight.
-    correlation_threshold : float
-        Minimum correlation to trigger penalty.
-    use_qaoa : bool
-        Whether to also run QAOA (requires Qiskit, ≤15 features).
-    reports_dir : str
-        Directory for saving reports.
-
-    Returns
-    -------
-    dict
-        Results including selected features, accuracy comparison,
-        and the QUBO summary.
+    Returns a dict with the selected indices / names, the comparison table
+    and the path of the saved QUBO-subset Random Forest.
     """
     n_features = X_train_agg.shape[1]
-    if feature_names is None:
-        feature_names = [f'feature_{i}' for i in range(n_features)]
+    feature_names = feature_names or [f'feature_{i}' for i in range(n_features)]
+    logger.info("QUBO feature selection: %d features -> K=%d | lambda=%.2f tau=%.2f | %s",
+                n_features, max_features, lambda_penalty, correlation_threshold,
+                get_solver_info())
 
-    print(f"\n{'='*60}")
-    print(f"  Quantum-Inspired Feature Selection")
-    print(f"{'='*60}")
-    print(f"  Total features: {n_features}")
-    print(f"  Max features to select: {max_features}")
-    print(f"  Lambda penalty: {lambda_penalty}")
-    print(f"  Correlation threshold: {correlation_threshold}")
+    relevance = compute_relevance_scores(rf_model)
+    corr = compute_correlation_matrix(X_train_agg)
 
-    solver_info = get_solver_info()
-    print(f"  Recommended solver: {solver_info['recommended']}")
+    qubo = build_qubo_matrix(corr, relevance, n_features, lambda_penalty=lambda_penalty,
+                             correlation_threshold=correlation_threshold,
+                             max_features=max_features)
+    selected_sa = run_simulated_annealing(qubo, n_reads=1000, seed=seed,
+                                          max_features=max_features)
+    if not selected_sa:
+        logger.warning("Annealer selected nothing; falling back to top-K by importance")
+        selected_sa = select_top_k(relevance, max_features)
 
-    # Step 1: Compute relevance scores from RF
-    print(f"\nStep 1: Computing feature relevance scores...")
-    relevance = compute_relevance_scores(rf_model, feature_names)
-    print(f"  Top 5 features by relevance:")
-    sorted_idx = np.argsort(relevance)[::-1]
-    for i in sorted_idx[:5]:
-        print(f"    {feature_names[i]}: {relevance[i]:.4f}")
-
-    # Step 2: Build correlation matrix
-    print(f"\nStep 2: Computing correlation matrix...")
-    corr_matrix = compute_correlation_matrix(X_train_agg)
-    n_high_corr = np.sum(corr_matrix > correlation_threshold) - n_features  # exclude diagonal
-    print(f"  Highly correlated pairs (>{correlation_threshold}): {n_high_corr // 2}")
-
-    # Step 3: Build and solve QUBO
-    print(f"\nStep 3: Building QUBO problem...")
-    qubo_dict = build_qubo_matrix(
-        corr_matrix, relevance, n_features,
-        lambda_penalty=lambda_penalty,
-        correlation_threshold=correlation_threshold
-    )
-
-    # Solve with simulated annealing
-    print(f"\nStep 4: Solving QUBO via simulated annealing...")
-    selected_indices_sa = run_simulated_annealing(
-        qubo_dict,
-        n_reads=1000,
-        max_features=max_features
-    )
-
-    if not selected_indices_sa:
-        selected_indices_sa = list(np.argsort(relevance)[::-1][:max_features])
-
-    # Optionally solve with QAOA
-    selected_indices_qaoa = None
-    if use_qaoa and QISKIT_AVAILABLE and n_features <= 15:
-        print(f"\nStep 4b: Solving QUBO via QAOA...")
-        qp = build_qubo_problem(
-            corr_matrix, relevance, n_features,
-            max_features=max_features,
-            lambda_penalty=lambda_penalty,
-            correlation_threshold=correlation_threshold
-        )
-        if qp is not None:
+    # Optional QAOA on the most relevant candidates only (statevector cost is 2^n).
+    selected_qaoa = None
+    if use_qaoa:
+        if not QISKIT_AVAILABLE:
+            logger.warning("--use-qaoa requested but Qiskit is not installed; skipping")
+        else:
+            candidates = select_top_k(relevance, min(QAOA_MAX_CANDIDATES, n_features))
+            k = min(max_features, len(candidates) - 1)
+            qp = build_qubo_problem(corr[np.ix_(candidates, candidates)], relevance[candidates],
+                                    len(candidates), max_features=k,
+                                    lambda_penalty=lambda_penalty,
+                                    correlation_threshold=correlation_threshold)
             try:
-                selected_indices_qaoa = run_qaoa(qp, reps=2)
-            except Exception as e:
-                print(f"  QAOA failed: {e}")
+                local = run_qaoa(qp, reps=2, max_vars=QAOA_MAX_CANDIDATES, seed=seed)
+                selected_qaoa = sorted(candidates[i] for i in local)
+            except Exception:
+                logger.exception("QAOA failed; continuing with simulated annealing result")
 
-    # Step 5: Evaluate — compare full vs selected features
-    print(f"\nStep 5: Comparing baseline vs QUBO-selected features...")
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.metrics import accuracy_score, f1_score
+    # Benchmark against non-quantum selectors at the same K.
+    subsets = {
+        'all_features': list(range(n_features)),
+        'qubo_simulated_annealing': selected_sa,
+        'top_k_importance': select_top_k(relevance, max_features),
+        'mrmr': select_mrmr(X_train_agg, y_train_agg, max_features, seed=seed),
+    }
+    if selected_qaoa:
+        subsets['qubo_qaoa'] = selected_qaoa
 
-    # Baseline: all features
-    rf_baseline = RandomForestClassifier(
-        n_estimators=200, max_depth=10,
-        class_weight='balanced', random_state=42, n_jobs=-1
-    )
-    rf_baseline.fit(X_train_agg, y_train_agg)
-    y_pred_baseline = rf_baseline.predict(X_test_agg)
-    acc_baseline = accuracy_score(y_test_agg, y_pred_baseline)
-    f1_baseline = f1_score(y_test_agg, y_pred_baseline, average='macro')
+    rows = [_score_subset(name, idx, X_train_agg, y_train_agg, X_test_agg, y_test_agg, seed)
+            for name, idx in subsets.items()]
 
-    # QUBO-selected features
-    X_train_selected = X_train_agg[:, selected_indices_sa]
-    X_test_selected = X_test_agg[:, selected_indices_sa]
+    rng = np.random.default_rng(seed)
+    random_rows = [
+        _score_subset('random_k', sorted(rng.choice(n_features, max_features, replace=False)),
+                      X_train_agg, y_train_agg, X_test_agg, y_test_agg, seed)
+        for _ in range(n_random_draws)
+    ]
+    random_summary = pd.DataFrame(random_rows).drop(columns='method').mean().to_dict()
+    rows.append({'method': f'random_k (mean of {n_random_draws})', **random_summary})
 
-    rf_qubo = RandomForestClassifier(
-        n_estimators=200, max_depth=10,
-        class_weight='balanced', random_state=42, n_jobs=-1
-    )
-    rf_qubo.fit(X_train_selected, y_train_agg)
-    y_pred_qubo = rf_qubo.predict(X_test_selected)
-    acc_qubo = accuracy_score(y_test_agg, y_pred_qubo)
-    f1_qubo = f1_score(y_test_agg, y_pred_qubo, average='macro')
+    comparison = pd.DataFrame(rows)
+    logger.info("Feature-selection comparison:\n%s", comparison.round(4).to_string(index=False))
 
-    # Print comparison
-    acc_delta = acc_qubo - acc_baseline
-    f1_delta = f1_qubo - f1_baseline
-    print(f"\n  {'Metric':<20} {'Baseline (all)':<18} {'QUBO-selected':<18} {'Delta':<10}")
-    print(f"  {'-'*66}")
-    print(f"  {'Accuracy':<20} {acc_baseline:<18.4f} {acc_qubo:<18.4f} {acc_delta:+.4f}")
-    print(f"  {'F1 (macro)':<20} {f1_baseline:<18.4f} {f1_qubo:<18.4f} {f1_delta:+.4f}")
-    print(f"  {'Num features':<20} {n_features:<18d} {len(selected_indices_sa):<18d}")
+    # Close the loop: keep a model that actually uses the QUBO subset.
+    rf_qubo = train_random_forest(X_train_agg[:, selected_sa], y_train_agg, seed=seed)
+    rf_qubo_path = os.path.join(model_dir, 'rf_qubo_model.joblib')
+    save_model(rf_qubo, rf_qubo_path)
 
-    # Build results
-    feature_summary = interpret_qubo_result(selected_indices_sa, feature_names, relevance)
-    selected_names = [feature_names[i] for i in selected_indices_sa]
+    os.makedirs(reports_dir, exist_ok=True)
+    interpret_qubo_result(selected_sa, feature_names, relevance).to_csv(
+        os.path.join(reports_dir, 'qubo_feature_selection_results.csv'), index=False)
+    comparison.to_csv(os.path.join(reports_dir, 'feature_selection_comparison.csv'), index=False)
 
     results = {
-        'selected_indices': selected_indices_sa,
-        'selected_names': selected_names,
+        'solver_used': 'simulated_annealing (classical, quantum-inspired)',
+        'selected_indices': [int(i) for i in selected_sa],
+        'selected_names': [feature_names[i] for i in selected_sa],
         'n_features_total': n_features,
-        'n_features_selected': len(selected_indices_sa),
-        'accuracy_baseline': acc_baseline,
-        'accuracy_qubo': acc_qubo,
-        'accuracy_delta': acc_delta,
-        'f1_baseline': f1_baseline,
-        'f1_qubo': f1_qubo,
-        'f1_delta': f1_delta,
-        'feature_summary': feature_summary,
-        'solver_used': 'simulated_annealing',
+        'n_features_selected': len(selected_sa),
+        'rf_qubo_model_path': rf_qubo_path,
+        'comparison': comparison.to_dict(orient='records'),
     }
+    if selected_qaoa:
+        results['qaoa_selected_indices'] = [int(i) for i in selected_qaoa]
+        results['qaoa_selected_names'] = [feature_names[i] for i in selected_qaoa]
 
-    if selected_indices_qaoa is not None:
-        results['qaoa_selected_indices'] = selected_indices_qaoa
-        results['qaoa_selected_names'] = [feature_names[i] for i in selected_indices_qaoa]
-
-    # Save results
-    os.makedirs(reports_dir, exist_ok=True)
-    csv_path = os.path.join(reports_dir, 'qubo_feature_selection_results.csv')
-    feature_summary.to_csv(csv_path, index=False)
-    print(f"\nFeature selection results saved: {csv_path}")
-
-    comparison_path = os.path.join(reports_dir, 'qubo_comparison.json')
-    comparison_data = {
-        k: v for k, v in results.items()
-        if k != 'feature_summary'
-    }
-    with open(comparison_path, 'w') as f:
-        json.dump(comparison_data, f, indent=2)
-    print(f"Comparison data saved: {comparison_path}")
-
+    with open(os.path.join(reports_dir, 'qubo_comparison.json'), 'w') as f:
+        json.dump(results, f, indent=2, default=float)
+    logger.info("QUBO selected: %s", results['selected_names'])
     return results

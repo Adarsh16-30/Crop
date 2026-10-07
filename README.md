@@ -1,206 +1,229 @@
-# 🌱 Quantum-Enhanced Crop Disease Detection System
+# Crop Disease Detection from Multispectral Time Series
 
-**Pre-symptomatic crop disease detection** using multispectral sensing, temporal AI models, quantum-inspired optimization, and real-time geospatial monitoring.
+A research prototype that classifies crop health (**Healthy / Early Stress /
+Active Disease**) from time series of Red-Edge, NIR and SWIR reflectance, with
+classical and deep sequence models, quantum-inspired feature selection,
+geo-spatial risk maps and a live MQTT → InfluxDB → Grafana dashboard.
 
-## Overview
-
-This system detects crop diseases **before visible symptoms appear** by analyzing Red-Edge and SWIR spectral band reflectance patterns over time. It combines:
-
-- **Synthetic multispectral sensor data** (simulating AS7265x + SWIR sensors)
-- **Classical ML** (Random Forest, XGBoost) and **Deep Learning** (LSTM, CNN-LSTM) models
-- **Quantum-inspired QUBO optimization** for feature selection via simulated annealing
-- **Geo-spatial risk mapping** with interactive Folium heatmaps
-- **Real-time Grafana dashboard** with InfluxDB time-series storage and MQTT data streaming
-- **FastAPI inference endpoint** for on-demand predictions
+> **Limitations — read first.**
+> - **All data is synthetic.** It comes from `src/data/data_generator.py`, and
+>   the class labels are defined by that generator. The reported accuracy
+>   measures how well the models recover the generator's signal model. It is
+>   **not** evidence of real-world or pre-symptomatic detection. Nothing here
+>   has been validated on field data.
+> - **"Quantum" means quantum-inspired.** Feature selection is a QUBO solved
+>   by classical simulated annealing on a CPU. QAOA (`--use-qaoa`) runs on a
+>   statevector simulator for a small, pre-filtered sub-problem. No quantum
+>   hardware is used.
+> - **The disease labels have no spatial structure.** The generator draws
+>   labels independently of location, so the risk maps show the method, not
+>   real hotspots.
+> - **Sensor choice is not settled.** The band set (705/740/783/842/1610/2190
+>   nm) assumes a dedicated SWIR sensor alongside a VIS/NIR sensor such as
+>   the AS7265x.
 
 ## Architecture
 
 ```
-Synthetic Data → MQTT (Mosquitto) → InfluxDB → Grafana Dashboard
-                                  ↓
-              Preprocessing → ML/DL Models → QUBO Optimization
-                                  ↓
-                        Geo-Spatial Risk Maps → Folium Heatmaps
-                                  ↓
-                           FastAPI REST API
+generator ─► preprocessing (split by sample → scaler fit on train only)
+                 │
+                 ├─► RF / XGBoost  (mean, std, slope, delta per feature)
+                 ├─► LSTM / CNN-LSTM (+ temperature calibration)
+                 ├─► QUBO feature selection vs. top-K / mRMR / random baselines
+                 └─► best model ─► risk maps (Folium, metric grid)
+
+simulator ─MQTT─► bridge ─► src.inference (indices + train scaler + model) ─► InfluxDB ─► Grafana
+REST client ─────► FastAPI ─► src.inference (same code path)
 ```
 
-## Prerequisites
+Training, the API and the MQTT bridge all go through one inference path
+(`src/inference/`). It computes the vegetation indices, applies the scaler
+saved inside the checkpoint, and applies the calibrated model. There is no
+separate preprocessing to keep in sync.
 
-- **Python 3.14.2**
-- **Docker Desktop** (for InfluxDB, Grafana, Mosquitto)
-- **CUDA GPU** (optional, for faster training)
+## Quick start
 
-## Quick Start
-
-### 1. Clone and Setup Environment
+Requires Python 3.12+ (tested on 3.14). Docker is needed only for the live
+dashboard.
 
 ```bash
-# Create virtual environment
 python -m venv venv
-venv\Scripts\activate        # Windows
-# source venv/bin/activate   # Linux/Mac
-
-# Install dependencies
-pip install -r requirements.txt
-
-# For CUDA GPU support (optional):
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+venv\Scripts\activate            # Windows  (source venv/bin/activate on Linux/macOS)
+pip install -r requirements-dev.txt
+# optional, for --use-qaoa:  pip install -r requirements-quantum.txt
 ```
 
-### 2. Start Infrastructure Services
+### Run the pipeline
 
 ```bash
-docker compose up -d
+python run_pipeline.py --samples 1500 --seq-len 30 --epochs 50 --skip-mqtt
 ```
 
-This starts:
-- **InfluxDB** → `http://localhost:8086` (admin / cropdetection2024)
-- **Grafana** → `http://localhost:3000` (admin / cropdetection)
-- **Mosquitto** → `localhost:1883`
+The main flags are `--models lstm cnn_lstm`, `--max-features 8`,
+`--use-qaoa`, `--grid-size-m 5000`, `--skip-quantum`, `--skip-geo`,
+`--seed`, `--lr`, `--hidden-dim` and `--dropout`.
 
-### 3. Run the Full Pipeline
+| Output | Contents |
+|---|---|
+| `data/processed/` | Split arrays, `scaler_params.json` (train-only fit), `sample_meta.csv`, `predictions.csv` (every sample, real id, split) |
+| `models/checkpoints/*.pt` | Self-describing checkpoints: weights, architecture, scaler, temperature, versions. Load with `weights_only=True`. |
+| `reports/model_comparison.csv` | Test metrics with 95% bootstrap CIs |
+| `reports/model_significance.csv` | Pairwise McNemar tests |
+| `reports/classical_cv.csv` | 5-fold CV, random vs. spatial-zone hold-out |
+| `reports/feature_selection_comparison.csv` | QUBO vs. top-K, mRMR and random-K |
+| `reports/disease_risk_map.html`, `zone_risk_map.html` | Interactive maps |
+
+### Live dashboard
 
 ```bash
-python run_pipeline.py --samples 500 --seq-len 30 --epochs 50
+cp .env.example .env              # then replace every "change-me" value
+docker compose up -d              # InfluxDB, Grafana, Mosquitto (bound to 127.0.0.1)
+python -m src.dashboard.influxdb_setup --create-tokens   # paste tokens into .env
+docker compose --profile app up -d                      # API, bridge, simulator
 ```
 
-This executes all phases:
-1. Generates synthetic spectral data
-2. Trains RF, XGBoost, LSTM, CNN-LSTM models
-3. Runs QUBO quantum feature selection
-4. Creates geo-spatial risk maps
-5. Prepares dashboard data
-
-### 4. Start Real-Time Monitoring
+You can also run the services directly:
 
 ```bash
-# Terminal 1: MQTT→InfluxDB bridge (with inference)
 python -m src.dashboard.mqtt_subscriber --model-path models/checkpoints/lstm_best.pt
-
-# Terminal 2: Simulated sensor publisher
-python -m src.data.mqtt_publisher --profile mixed --interval 2
-
-# Terminal 3: FastAPI endpoint
-uvicorn src.api.main:app --reload --port 8000
+python -m src.data.mqtt_publisher --profile mixed --interval 1
+uvicorn src.api.main:app --port 8000
 ```
 
-Then open:
-- **Grafana Dashboard**: http://localhost:3000
-- **FastAPI Docs**: http://localhost:8000/docs
-- **Risk Map**: Open `reports/disease_risk_map.html` in browser
+Grafana is at http://localhost:3000. It has a station filter, the
+prediction panels, a bridge-health panel and a high-risk alert rule. Each
+simulated station publishes one complete 30-reading crop cycle at a time.
+The bridge predicts once per completed cycle, so with 5 stations at 1 s
+intervals the first predictions appear after about 2.5 minutes.
 
-## Project Structure
+Security defaults:
 
-```
-quantum-crop-disease/
-├── config/
-│   ├── influxdb.ini              # InfluxDB connection config
-│   ├── mqtt.ini                  # MQTT broker config
-│   └── mosquitto.conf            # Mosquitto broker config
-├── data/
-│   ├── raw/                      # Synthetic CSVs
-│   └── processed/                # Preprocessed numpy arrays
-├── docker-compose.yml            # InfluxDB + Grafana + Mosquitto
-├── models/
-│   └── checkpoints/              # Saved model weights
-├── notebooks/
-│   ├── 01_eda_and_visualization.ipynb
-│   ├── 02_model_experiments.ipynb
-│   └── 03_qubo_experiments.ipynb
-├── reports/
-│   ├── disease_risk_map.html     # Interactive Folium map
-│   ├── model_comparison.csv      # Model comparison table
-│   └── qubo_feature_selection_results.csv
-├── run_pipeline.py               # End-to-end pipeline runner
-├── requirements.txt
-├── src/
-│   ├── api/main.py               # FastAPI inference endpoint
-│   ├── dashboard/
-│   │   ├── grafana/              # Grafana provisioning configs
-│   │   ├── influxdb_setup.py     # InfluxDB initialization
-│   │   └── mqtt_subscriber.py    # MQTT→InfluxDB bridge
-│   ├── data/
-│   │   ├── data_generator.py     # Synthetic data generation
-│   │   ├── mqtt_publisher.py     # Simulated sensor publisher
-│   │   └── preprocessor.py       # Data preprocessing pipeline
-│   ├── evaluation/evaluate.py    # Model evaluation & comparison
-│   ├── features/spectral_indices.py  # Vegetation index computation
-│   ├── geospatial/
-│   │   ├── heatmap.py            # Folium map generation
-│   │   └── risk_mapper.py        # GeoDataFrame & risk scoring
-│   ├── models/
-│   │   ├── classical_models.py   # RF & XGBoost
-│   │   ├── cnn_lstm_model.py     # CNN-LSTM hybrid
-│   │   └── lstm_model.py         # SpectralLSTM
-│   ├── quantum/
-│   │   ├── annealing_optimizer.py # SA & QAOA solvers
-│   │   ├── integration.py        # QUBO pipeline orchestration
-│   │   └── qubo_feature_selector.py # QUBO formulation
-│   └── training/train.py         # Unified training script
-└── tests/                        # pytest test suite
-```
+- Every credential is read from `.env`, never from the repo.
+- MQTT requires a username and password, with ACLs limiting access to `crop/#`.
+- The bridge writes with a write-only InfluxDB token, and Grafana reads with a read-only one.
+- The API requires `X-API-Key`. For local development only, set `API_ALLOW_UNAUTHENTICATED=true`.
 
-## Disease Classes
+## API
 
-| Class | Label | Description |
-|-------|-------|-------------|
-| 0 | Healthy | Normal crop reflectance |
-| 1 | Early Stress | Pre-symptomatic — spectral anomalies detected |
-| 2 | Active Disease | Visible disease symptoms, confirmed spectral degradation |
-
-## API Usage
-
-### Predict Disease
+The API takes **raw band reflectances**, exactly `seq_len` rows of 6 values
+in [0, 1]. Band order is `red_edge_705, red_edge_740, red_edge_783, nir_842,
+swir_1610, swir_2190`. The server computes the indices and the scaling.
 
 ```bash
 curl -X POST http://localhost:8000/predict \
-  -H "Content-Type: application/json" \
-  -d '{"sequence": [[0.35,0.55,0.65,0.80,0.20,0.15,0.45,0.60,0.90,0.78,0.25,1.03]] * 30}'
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
+  -d '{"readings": [[0.35,0.55,0.65,0.80,0.20,0.15], ... 30 rows ...]}'
 ```
 
-Response:
 ```json
 {
   "predicted_label": 0,
   "label_name": "Healthy",
-  "confidence": 0.9234,
-  "risk_score": 0.0,
-  "probabilities": [0.9234, 0.0521, 0.0245],
-  "inference_time_ms": 12.5
+  "confidence": 0.93,
+  "risk_score": 0.05,
+  "probabilities": [0.93, 0.04, 0.03],
+  "status": "ok",
+  "out_of_distribution": false,
+  "model_type": "lstm",
+  "inference_time_ms": 3.1
 }
 ```
 
-## Running Tests
+The values above are illustrative.
+
+- **Probabilities and risk.** Probabilities are temperature-calibrated.
+  `risk_score` is the probability-weighted risk Σ pᵢ·wᵢ, with w = (0, 0.5, 1).
+- **`status`** is one of:
+  - `ok`
+  - `low_confidence`: confidence is below `LOW_CONFIDENCE_THRESHOLD`
+  - `out_of_distribution`: any standardized feature has |z| > 8
+- **Other endpoints:**
+  - `POST /predict/batch`
+  - `GET /info`: model metadata, including `seq_len`
+  - `GET /health`: 503 when no model is loaded
+  - `GET /metrics`: Prometheus
+- **Limits:** rate limiting, a body-size cap, a batch-size cap and CORS are
+  all configured by environment variables (see `src/api/main.py`).
+
+## Results (synthetic data)
+
+These numbers come from `python run_pipeline.py --samples 1500 --seq-len 30 --epochs 50 --seed 42`.
+The test set is 225 samples, and the intervals are 95% bootstrap CIs. Rerunning
+produces `reports/model_comparison.csv`.
+
+| Model | Accuracy [95% CI] | Macro-F1 | Early-Stress F1 |
+|---|---|---|---|
+| CNN-LSTM | 0.969 [0.942, 0.991] | 0.971 | 0.944 |
+| Random Forest | 0.960 [0.933, 0.982] | 0.956 | 0.927 |
+| XGBoost | 0.951 [0.920, 0.978] | 0.945 | 0.909 |
+| RF, 8 QUBO-selected features | 0.942 [0.911, 0.969] | 0.935 | 0.894 |
+| LSTM | 0.933 [0.898, 0.964] | 0.940 | 0.887 |
+
+How to read these results:
+
+- **Most differences are not significant.** McNemar tests
+  (`reports/model_significance.csv`) find only one significant pair:
+  CNN-LSTM beats LSTM, p = 0.04. Every other pair, including CNN-LSTM vs.
+  Random Forest, is within noise. Once the classical models get trend
+  features (slope and delta), they are as good as the sequence models on
+  this data.
+- **Spatial CV matches random CV** (Random Forest macro-F1 0.970 vs. 0.968).
+  This is expected, because the generator's labels have no spatial
+  structure. It is a sanity check, not evidence of geographic generalization.
+- **QUBO feature selection** (8 of 48 features) is compared with the same
+  number of features from simpler methods (5-fold CV macro-F1 / test
+  macro-F1):
+
+  | Selection method | CV macro-F1 | Test macro-F1 |
+  |---|---|---|
+  | QUBO | 0.956 | 0.935 |
+  | mRMR | 0.945 | 0.935 |
+  | Top-K by importance | 0.945 | 0.919 |
+  | Random K | 0.883 | 0.882 |
+  | All 48 features | 0.965 | 0.956 |
+
+  QUBO is competitive with standard selectors but does not beat using all
+  features.
+- **None of this transfers to real fields** until validated on field data
+  (see Limitations).
+
+## Tests
 
 ```bash
-# Full test suite
-pytest tests/ -v --cov=src --cov-report=html
-
-# Specific modules
-pytest tests/test_data.py -v
-pytest tests/test_models.py -v
-pytest tests/test_quantum.py -v
+pytest -m "not slow"          # ~110 fast tests: inference parity, API, streaming, QUBO, geo
+pytest -m slow                # end-to-end pipeline on a tiny dataset (~1.5 min)
+pytest --cov                  # coverage
 ```
 
-## Key Technologies
+The API tests run against a real, freshly trained model. The parity test
+asserts that raw readings sent through the API path produce the same
+probabilities as the offline preprocessed path.
 
-| Layer | Technology |
-|-------|-----------|
-| ML/DL | PyTorch, Scikit-Learn, XGBoost |
-| Quantum | Qiskit, D-Wave Neal (simulated annealing) |
-| Geo-Spatial | GeoPandas, Folium, Shapely |
-| Dashboard | Grafana, InfluxDB, MQTT |
-| API | FastAPI |
+## Project structure
 
-## Future: Hardware Integration
+```
+config/            non-secret INI settings, Mosquitto config + ACL
+src/
+  constants.py     bands, labels, risk weights (single source of truth)
+  config.py        INI + env loading, MQTT client factory
+  data/            generator, preprocessing, MQTT simulator
+  features/        vegetation indices (array/DataFrame, finite-checked)
+  models/          LSTM, CNN-LSTM, RF/XGBoost + CV, model factory
+  training/        training loop, calibration, self-describing checkpoints
+  inference/       feature pipeline + predictor (used by API, bridge, pipeline)
+  evaluation/      metrics, bootstrap CIs, McNemar, plots
+  quantum/         QUBO formulation, solvers, baseline comparison
+  geospatial/      risk GeoDataFrames, metric zone grid, Folium maps
+  api/             FastAPI service
+  dashboard/       MQTT→InfluxDB bridge, InfluxDB setup, Grafana provisioning
+run_pipeline.py    end-to-end runner
+tests/             pytest suite
+```
 
-When the software stack is validated, hardware sensors can replace the synthetic data:
-- **AS7265x** multispectral sensor → replace MQTT publisher
-- **Raspberry Pi / Jetson Nano** → edge inference via ONNX
-- **Neo-6M GPS** → real GPS coordinates
-- **LoRa/GSM** → remote data transmission
+## Disease classes
 
----
-
-*Quantum-Enhanced Edge-AI Crop Disease Detection System — Software Phase v1.0*
+| Class | Label | Meaning in the generator |
+|---|---|---|
+| 0 | Healthy | No disease trajectory |
+| 1 | Early Stress | Late, slow, low-amplitude logistic decline |
+| 2 | Active Disease | Earlier, faster, stronger decline |

@@ -1,168 +1,122 @@
 """
 Geo-Spatial Risk Mapping
 =========================
-Converts model predictions with GPS coordinates into GeoPandas
-GeoDataFrames with risk scores for spatial analysis.
+Converts model predictions with GPS coordinates into GeoDataFrames with
+probability-weighted risk scores, and aggregates them on a metric grid.
 """
 
+import logging
+import os
+
+import geopandas as gpd
 import numpy as np
 import pandas as pd
-import geopandas as gpd
-from shapely.geometry import Point, box
+from shapely.geometry import box
 
+from src.constants import NUM_CLASSES, RISK_BINS, RISK_CATEGORIES, expected_risk
 
-# Risk score mapping: disease class → base risk
-RISK_MAP = {0: 0.0, 1: 0.5, 2: 1.0}
+logger = logging.getLogger(__name__)
+
+PROB_COLUMNS = [f'prob_class_{i}' for i in range(NUM_CLASSES)]
 
 
 def build_geodataframe(predictions_df: pd.DataFrame) -> gpd.GeoDataFrame:
     """
-    Convert a predictions DataFrame into a GeoDataFrame with risk scores.
+    Convert predictions into a GeoDataFrame with risk scores.
 
-    Parameters
-    ----------
-    predictions_df : pd.DataFrame
-        Must contain columns: lat, lon, predicted_label, confidence.
-        Optional columns: sample_id, timestamp, spectral bands.
-
-    Returns
-    -------
-    gpd.GeoDataFrame
-        GeoDataFrame with geometry (Points), risk_score, and all input columns.
+    Required columns: lat, lon, predicted_label, and either
+    `prob_class_0..2` (risk is computed as the probability-weighted sum) or
+    an existing `risk_score` column. Rows with missing coordinates are
+    dropped with a warning -- coordinates are never invented.
     """
     df = predictions_df.copy()
 
-    # Create geometries in a vectorized way for better performance
-    geometry = gpd.points_from_xy(df['lon'], df['lat'])
+    missing_gps = df['lat'].isna() | df['lon'].isna()
+    if missing_gps.any():
+        logger.warning("Dropping %d predictions with missing GPS coordinates",
+                       int(missing_gps.sum()))
+        df = df.loc[~missing_gps]
 
-    # Compute risk score: base_risk(label) * confidence
-    df['risk_score'] = df['predicted_label'].map(RISK_MAP) * df['confidence']
+    if all(c in df for c in PROB_COLUMNS):
+        df['risk_score'] = expected_risk(df[PROB_COLUMNS].to_numpy())
+    elif 'risk_score' not in df:
+        raise ValueError(f"Need {PROB_COLUMNS} or a risk_score column to compute risk")
 
-    # Clamp risk score to [0, 1]
     df['risk_score'] = df['risk_score'].clip(0.0, 1.0)
+    df['risk_category'] = pd.cut(df['risk_score'], bins=RISK_BINS, labels=RISK_CATEGORIES)
 
-    # Risk category for easier filtering / visualization
-    df['risk_category'] = pd.cut(
-        df['risk_score'],
-        bins=[-0.01, 0.2, 0.5, 0.7, 1.01],
-        labels=['Low', 'Moderate', 'High', 'Critical']
-    )
-
-    gdf = gpd.GeoDataFrame(df, geometry=geometry, crs='EPSG:4326')
-    return gdf
+    return gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df['lon'], df['lat']),
+                            crs='EPSG:4326')
 
 
 def aggregate_zone_risk(
     gdf: gpd.GeoDataFrame,
-    grid_size: float = 0.01,
-    min_samples: int = 1
+    grid_size_m: float = 5000.0,
+    min_samples: int = 3
 ) -> gpd.GeoDataFrame:
     """
-    Aggregate risk scores into a spatial grid.
+    Aggregate risk into square grid cells of `grid_size_m` metres.
 
-    Divides the extent into cells of `grid_size` degrees and computes
-    mean risk per cell.
-
-    Parameters
-    ----------
-    gdf : gpd.GeoDataFrame
-        GeoDataFrame with risk_score and geometry columns.
-    grid_size : float
-        Grid cell size in degrees (default: ~1.1 km at equator).
-    min_samples : int
-        Minimum number of samples in a cell to include it.
-
-    Returns
-    -------
-    gpd.GeoDataFrame
-        Grid of zones with mean_risk, max_risk, sample_count, and polygon geometry.
+    The grid is built in a local UTM projection (so cells are equal-area,
+    unlike degree-based cells) and returned in EPSG:4326 for web maps.
+    Cells with fewer than `min_samples` points are dropped as too sparse to
+    report a zone-level risk.
     """
-    # Snap points to a regular grid and aggregate in one pass
-    bounds = gdf[['lon', 'lat']].copy()
-    bounds['x_bin'] = np.floor(bounds['lon'] / grid_size).astype(int)
-    bounds['y_bin'] = np.floor(bounds['lat'] / grid_size).astype(int)
-    grouped = gdf.copy()
-    grouped['x_bin'] = bounds['x_bin']
-    grouped['y_bin'] = bounds['y_bin']
+    empty = gpd.GeoDataFrame(columns=['geometry', 'mean_risk'], geometry='geometry',
+                             crs='EPSG:4326')
+    if gdf.empty:
+        return empty
 
-    aggregated = grouped.groupby(['x_bin', 'y_bin'], sort=False).agg(
+    utm = gdf.estimate_utm_crs()
+    projected = gdf.to_crs(utm)
+    work = pd.DataFrame({
+        'x_bin': np.floor(projected.geometry.x / grid_size_m).astype(int),
+        'y_bin': np.floor(projected.geometry.y / grid_size_m).astype(int),
+        'risk_score': gdf['risk_score'].to_numpy(),
+        'predicted_label': gdf['predicted_label'].to_numpy(),
+    })
+
+    agg = work.groupby(['x_bin', 'y_bin'], sort=False).agg(
         mean_risk=('risk_score', 'mean'),
         max_risk=('risk_score', 'max'),
         min_risk=('risk_score', 'min'),
         std_risk=('risk_score', 'std'),
         sample_count=('risk_score', 'size'),
-        dominant_label=('predicted_label', lambda s: int(s.mode().iloc[0]))
+        dominant_label=('predicted_label', lambda s: int(s.mode().iloc[0])),
     ).reset_index()
+    agg = agg[agg['sample_count'] >= min_samples].copy()
+    if agg.empty:
+        logger.warning("No grid zones with >= %d samples (grid %.0f m)", min_samples, grid_size_m)
+        return empty
 
-    aggregated = aggregated[aggregated['sample_count'] >= min_samples].copy()
+    cells = [box(x * grid_size_m, y * grid_size_m, (x + 1) * grid_size_m, (y + 1) * grid_size_m)
+             for x, y in zip(agg['x_bin'], agg['y_bin'])]
+    zone_gdf = gpd.GeoDataFrame(agg, geometry=cells, crs=utm).to_crs('EPSG:4326')
+    centroids = gpd.GeoSeries(cells, crs=utm).centroid.to_crs('EPSG:4326')
+    zone_gdf['center_lon'] = centroids.x.to_numpy()
+    zone_gdf['center_lat'] = centroids.y.to_numpy()
+    zone_gdf['std_risk'] = zone_gdf['std_risk'].fillna(0.0)
+    zone_gdf['zone_risk_category'] = pd.cut(zone_gdf['mean_risk'], bins=RISK_BINS,
+                                            labels=RISK_CATEGORIES)
 
-    if len(aggregated) > 0:
-        aggregated['lon_min'] = aggregated['x_bin'] * grid_size
-        aggregated['lat_min'] = aggregated['y_bin'] * grid_size
-        aggregated['center_lon'] = aggregated['lon_min'] + grid_size / 2
-        aggregated['center_lat'] = aggregated['lat_min'] + grid_size / 2
-        aggregated['geometry'] = [
-            box(x, y, x + grid_size, y + grid_size)
-            for x, y in zip(aggregated['lon_min'], aggregated['lat_min'])
-        ]
-
-    if len(aggregated) == 0:
-        print("WARNING: No grid zones created. Check data bounds and grid_size.")
-        return gpd.GeoDataFrame(columns=['geometry', 'mean_risk'], crs='EPSG:4326')
-
-    zone_gdf = gpd.GeoDataFrame(aggregated, geometry='geometry', crs='EPSG:4326')
-
-    # Risk category for zones
-    zone_gdf['zone_risk_category'] = pd.cut(
-        zone_gdf['mean_risk'],
-        bins=[-0.01, 0.2, 0.5, 0.7, 1.01],
-        labels=['Low', 'Moderate', 'High', 'Critical']
-    )
-
-    return zone_gdf[['geometry', 'center_lon', 'center_lat', 'mean_risk', 'max_risk', 'min_risk', 'std_risk', 'sample_count', 'dominant_label', 'zone_risk_category']]
+    return zone_gdf[['geometry', 'center_lon', 'center_lat', 'mean_risk', 'max_risk',
+                     'min_risk', 'std_risk', 'sample_count', 'dominant_label',
+                     'zone_risk_category']]
 
 
-def export_geojson(
-    gdf: gpd.GeoDataFrame,
-    output_path: str
-) -> None:
-    """
-    Export GeoDataFrame to GeoJSON file.
-
-    Parameters
-    ----------
-    gdf : gpd.GeoDataFrame
-        GeoDataFrame to export.
-    output_path : str
-        Output file path.
-    """
-    import os
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-    # Drop non-serializable columns
+def export_geojson(gdf: gpd.GeoDataFrame, output_path: str) -> None:
+    """Export a GeoDataFrame to GeoJSON (non-numeric columns stringified)."""
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
     export_df = gdf.copy()
     for col in export_df.columns:
         if col != 'geometry' and not pd.api.types.is_numeric_dtype(export_df[col]):
             export_df[col] = export_df[col].astype(str)
-
     export_df.to_file(output_path, driver='GeoJSON')
-    print(f"GeoJSON exported: {output_path}")
+    logger.info("GeoJSON exported: %s", output_path)
 
 
 def get_risk_summary(gdf: gpd.GeoDataFrame) -> dict:
-    """
-    Generate a summary of risk statistics.
-
-    Parameters
-    ----------
-    gdf : gpd.GeoDataFrame
-        GeoDataFrame with risk scores.
-
-    Returns
-    -------
-    dict
-        Summary statistics.
-    """
+    """Summary statistics of point-level risk."""
     return {
         'total_samples': len(gdf),
         'mean_risk': float(gdf['risk_score'].mean()),

@@ -2,119 +2,106 @@
 Unit Tests — Data Generation & Spectral Indices
 """
 
-import pytest
 import numpy as np
 import pandas as pd
 
-from src.data.data_generator import (
-    generate_spectral_sequence, generate_dataset, BANDS, LABEL_NAMES
+from src.data.data_generator import BANDS, generate_dataset, generate_spectral_sequence
+from src.features.spectral_indices import (
+    REIP_MAX_NM,
+    REIP_MIN_NM,
+    compute_indices,
+    get_feature_columns,
+    raw_to_features,
 )
-from src.features.spectral_indices import compute_indices, get_feature_columns
 
 
 class TestSpectralSequenceGeneration:
-    """Tests for single spectral sequence generation."""
 
     def test_sequence_shape(self):
         df = generate_spectral_sequence(n_timesteps=30, label=1)
         assert len(df) == 30
-        for band in BANDS:
-            assert band in df.columns
+        assert all(band in df.columns for band in BANDS)
 
     def test_sequence_has_label_and_timestamp(self):
         df = generate_spectral_sequence(n_timesteps=10, label=2)
-        assert 'label' in df.columns
-        assert 'timestamp' in df.columns
         assert (df['label'] == 2).all()
         assert df['timestamp'].tolist() == list(range(10))
 
     def test_values_clamped_to_valid_range(self):
         df = generate_spectral_sequence(n_timesteps=50, label=2, noise=0.1)
         for band in BANDS:
-            assert df[band].min() >= 0.0
-            assert df[band].max() <= 1.0
+            assert df[band].between(0.0, 1.0).all()
 
     def test_disease_progression_nir_degrades(self):
-        """NIR should be lower on average in diseased vs healthy crops."""
         healthy = generate_spectral_sequence(30, label=0, seed=42)
         diseased = generate_spectral_sequence(30, label=2, seed=42)
         assert diseased['nir_842'].mean() < healthy['nir_842'].mean()
 
-    def test_different_seeds_produce_different_data(self):
-        df1 = generate_spectral_sequence(10, label=0, seed=1)
-        df2 = generate_spectral_sequence(10, label=0, seed=2)
-        assert not df1['nir_842'].equals(df2['nir_842'])
-
-    def test_same_seed_reproduces_data(self):
-        df1 = generate_spectral_sequence(10, label=0, seed=42)
-        df2 = generate_spectral_sequence(10, label=0, seed=42)
-        pd.testing.assert_frame_equal(df1, df2)
+    def test_seed_reproducibility(self):
+        pd.testing.assert_frame_equal(generate_spectral_sequence(10, label=0, seed=42),
+                                      generate_spectral_sequence(10, label=0, seed=42))
+        assert not generate_spectral_sequence(10, label=0, seed=1)['nir_842'].equals(
+            generate_spectral_sequence(10, label=0, seed=2)['nir_842'])
 
 
 class TestDatasetGeneration:
-    """Tests for full dataset generation."""
 
     def test_dataset_shape(self):
         df = generate_dataset(n_samples=50, seq_len=10)
-        assert len(df) == 50 * 10  # n_samples * seq_len
-        assert 'sample_id' in df.columns
-        assert 'lat' in df.columns
-        assert 'lon' in df.columns
+        assert len(df) == 500
+        assert {'sample_id', 'lat', 'lon'} <= set(df.columns)
 
     def test_dataset_label_distribution(self):
-        df = generate_dataset(n_samples=1000, seq_len=5, seed=42)
-        labels = df.groupby('sample_id')['label'].first()
-        # With p=[0.5, 0.3, 0.2], we expect roughly these proportions
-        assert labels.value_counts()[0] > 300  # Healthy should be most common
+        labels = generate_dataset(n_samples=1000, seq_len=5, seed=42) \
+            .groupby('sample_id')['label'].first()
+        assert labels.value_counts()[0] > 300
 
     def test_gps_coordinates_in_range(self):
-        df = generate_dataset(n_samples=100, seq_len=5,
-                              center_lat=12.97, center_lon=77.59, gps_spread=0.5)
-        assert df['lat'].min() >= 12.97 - 0.6
-        assert df['lat'].max() <= 12.97 + 0.6
-        assert df['lon'].min() >= 77.59 - 0.6
-        assert df['lon'].max() <= 77.59 + 0.6
+        df = generate_dataset(n_samples=100, seq_len=5, center_lat=12.97, center_lon=77.59,
+                              gps_spread=0.5)
+        assert df['lat'].between(12.47, 13.47).all()
+        assert df['lon'].between(77.09, 78.09).all()
 
 
 class TestSpectralIndices:
-    """Tests for vegetation index computation."""
 
-    def test_ndre_range(self):
-        df = generate_spectral_sequence(n_timesteps=10, label=0)
-        df = compute_indices(df)
+    def test_all_indices_finite_on_full_dataset(self):
+        """Regression: REIP used to range from -1.8e5 to +4.6e6."""
+        df = compute_indices(generate_dataset(n_samples=300, seq_len=30, seed=42))
+        values = df[get_feature_columns()].to_numpy()
+        assert np.isfinite(values).all()
+
+    def test_reip_is_a_red_edge_wavelength(self):
+        df = compute_indices(generate_dataset(n_samples=300, seq_len=30, seed=42))
+        assert df['REIP_approx'].between(REIP_MIN_NM, REIP_MAX_NM).all()
+
+    def test_reip_handles_degenerate_bands(self):
+        df = pd.DataFrame({b: [0.5] for b in BANDS})  # flat spectrum: old formula -> inf
+        out = compute_indices(df)
+        assert np.isfinite(out['REIP_approx']).all()
+
+    def test_zero_reflectance_does_not_produce_inf(self):
+        df = pd.DataFrame({b: [0.0] for b in BANDS})
+        out = compute_indices(df)
+        assert np.isfinite(out[get_feature_columns()].to_numpy()).all()
+
+    def test_normalized_indices_range(self):
+        df = compute_indices(generate_spectral_sequence(n_timesteps=10, label=0))
         assert df['NDRE'].between(-1, 1).all()
-
-    def test_ndvi_range(self):
-        df = generate_spectral_sequence(n_timesteps=10, label=0)
-        df = compute_indices(df)
         assert df['NDVI'].between(-1, 1).all()
-
-    def test_msi_non_negative(self):
-        df = generate_spectral_sequence(n_timesteps=10, label=0)
-        df = compute_indices(df)
         assert (df['MSI'] >= 0).all()
 
-    def test_all_indices_computed(self):
-        df = generate_spectral_sequence(n_timesteps=10, label=0)
-        df = compute_indices(df)
-        expected = ['NDRE', 'NDVI', 'MSI', 'SWIR_ratio', 'REIP_approx', 'CRI']
-        for idx in expected:
-            assert idx in df.columns
-
-    def test_no_nan_in_indices(self):
-        df = generate_spectral_sequence(n_timesteps=10, label=0)
-        df = compute_indices(df)
-        for idx in ['NDRE', 'NDVI', 'MSI', 'SWIR_ratio']:
-            assert not df[idx].isna().any()
+    def test_raw_to_features_matches_dataframe_path(self):
+        """The array path used at inference equals the DataFrame path used in training."""
+        df = compute_indices(generate_spectral_sequence(n_timesteps=15, label=2, seed=3))
+        from_array = raw_to_features(df[BANDS].to_numpy())
+        np.testing.assert_allclose(from_array, df[get_feature_columns()].to_numpy(), rtol=1e-12)
 
     def test_feature_columns_helper(self):
-        cols = get_feature_columns(include_raw=True, include_indices=True)
-        assert len(cols) == 12  # 6 raw + 6 indices
-        cols_raw = get_feature_columns(include_raw=True, include_indices=False)
-        assert len(cols_raw) == 6
+        assert len(get_feature_columns()) == 12
+        assert len(get_feature_columns(include_indices=False)) == 6
 
-    def test_inplace_vs_copy(self):
+    def test_inplace_false_returns_copy(self):
         df = generate_spectral_sequence(10, label=0)
-        df_copy = compute_indices(df, inplace=False)
-        assert 'NDRE' in df_copy.columns
-        # Original should be modified since we called inplace default=True first time
+        out = compute_indices(df, inplace=False)
+        assert 'NDRE' in out.columns and 'NDRE' not in df.columns

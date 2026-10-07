@@ -126,8 +126,6 @@ class CNNLSTMModel(nn.Module):
         torch.Tensor (optional)
             Attention weights of shape (batch, seq_len) if return_attention=True.
         """
-        batch_size = x.size(0)
-
         # CNN: extract spectral features at each timestep
         # (batch, seq_len, n_bands) → (batch, n_bands, seq_len)
         x = x.permute(0, 2, 1)

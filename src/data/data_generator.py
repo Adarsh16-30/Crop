@@ -44,15 +44,11 @@ another and disease is not trivially linearly separable in a scatter plot:
 
 import argparse
 import os
+
 import numpy as np
 import pandas as pd
 
-
-# Spectral band names matching AS7265x + SWIR sensor configuration
-BANDS = [
-    'red_edge_705', 'red_edge_740', 'red_edge_783',
-    'nir_842', 'swir_1610', 'swir_2190'
-]
+from src.constants import BANDS, LABEL_NAMES  # noqa: F401  (re-exported)
 
 # Base reflectance values for healthy vegetation (typical values)
 BASE_REFLECTANCE = {
@@ -63,9 +59,6 @@ BASE_REFLECTANCE = {
     'swir_1610': 0.20,
     'swir_2190': 0.15
 }
-
-# Disease class labels
-LABEL_NAMES = {0: 'Healthy', 1: 'Early Stress', 2: 'Active Disease'}
 
 # Per-band maximum absolute reflectance shift at full severity (severity=1.0).
 # Negative = degrades with disease (chlorophyll/canopy breakdown), positive =
@@ -315,7 +308,7 @@ def main():
                         help='Output CSV path (default: data/raw/spectral_dataset.csv)')
     args = parser.parse_args()
 
-    print(f"Generating synthetic spectral dataset...")
+    print("Generating synthetic spectral dataset...")
     print(f"  Samples: {args.samples}")
     print(f"  Sequence length: {args.seq_len}")
     print(f"  Noise: {args.noise}")
@@ -338,7 +331,7 @@ def main():
     print(f"\nDataset saved to: {args.output}")
     print(f"  Total rows: {total_rows}")
     print(f"  Total samples: {args.samples}")
-    print(f"  Label distribution:")
+    print("  Label distribution:")
     for label_val, count in sorted(label_counts.items()):
         print(f"    {LABEL_NAMES[label_val]}: {count} ({count/args.samples*100:.1f}%)")
 

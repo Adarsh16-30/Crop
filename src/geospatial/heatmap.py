@@ -5,12 +5,18 @@ Creates Folium-based interactive maps with heatmap overlays,
 risk markers, and zone boundaries for crop disease visualization.
 """
 
+import logging
 import os
 
 import folium
-from folium.plugins import HeatMap, MarkerCluster
 import geopandas as gpd
-import pandas as pd
+from folium.plugins import HeatMap, MarkerCluster
+
+from src.constants import LABEL_NAMES
+
+logger = logging.getLogger(__name__)
+
+LABEL_COLORS = {0: 'green', 1: 'orange', 2: 'red'}
 
 
 def generate_risk_heatmap(
@@ -23,7 +29,7 @@ def generate_risk_heatmap(
 
     Features:
     - Base heatmap layer (green → yellow → red gradient)
-    - Individual markers for high-risk zones (risk > 0.7)
+    - Individual markers for high-risk points (risk > 0.7)
     - Popup details per marker
     - Layer controls for toggling overlays
     - Custom tile layers
@@ -54,9 +60,9 @@ def generate_risk_heatmap(
     )
 
     # Add tile layers
-    folium.TileLayer('CartoDB positron', name='Light').add_to(m)
-    folium.TileLayer('CartoDB dark_matter', name='Dark').add_to(m)
+    # Keyless tile providers (CartoDB tiles now require an API key).
     folium.TileLayer('OpenStreetMap', name='Street').add_to(m)
+    folium.TileLayer('Esri.WorldImagery', name='Satellite').add_to(m)
 
     # ── Heatmap Layer ──────────────────────────────────────────
     heat_data = [
@@ -81,8 +87,8 @@ def generate_risk_heatmap(
     heatmap_layer.add_to(m)
 
     # ── High-Risk Markers ──────────────────────────────────────
-    label_names = {0: 'Healthy', 1: 'Early Stress', 2: 'Active Disease'}
-    label_colors = {0: 'green', 1: 'orange', 2: 'red'}
+    label_names = LABEL_NAMES
+    label_colors = LABEL_COLORS
 
     high_risk = gdf[gdf['risk_score'] > 0.7]
     if len(high_risk) > 0:
@@ -99,6 +105,7 @@ def generate_risk_heatmap(
                 <b>Risk Score:</b> {row['risk_score']:.3f}<br>
                 <b>Confidence:</b> {row['confidence']:.3f}<br>
                 <b>Location:</b> ({row['lat']:.4f}, {row['lon']:.4f})<br>
+                <b>Sample:</b> {row.get('sample_id', '?')} ({row.get('split', '?')})<br>
             </div>
             """
             folium.CircleMarker(
@@ -126,7 +133,8 @@ def generate_risk_heatmap(
             fill_color=label_colors[label],
             fill_opacity=0.3,
             weight=1,
-            tooltip=f"{label_names[label]} | Risk: {row['risk_score']:.2f}"
+            tooltip=(f"{label_names[label]} | Risk: {row['risk_score']:.2f} | "
+                     f"sample {row.get('sample_id', '?')} ({row.get('split', '?')})")
         ).add_to(all_markers)
     all_markers.add_to(m)
 
@@ -165,9 +173,9 @@ def generate_risk_heatmap(
     folium.LayerControl(collapsed=False).add_to(m)
 
     # Save
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
     m.save(output_path)
-    print(f"Interactive risk heatmap saved: {output_path}")
+    logger.info("Interactive risk heatmap saved: %s", output_path)
 
     return m
 
@@ -197,7 +205,7 @@ def generate_zone_map(
     m = folium.Map(
         location=[center_lat, center_lon],
         zoom_start=12,
-        tiles='CartoDB positron'
+        tiles='OpenStreetMap'
     )
 
     def risk_color(risk: float) -> str:
@@ -234,8 +242,8 @@ def generate_zone_map(
         geo_json.add_to(m)
 
     # Save
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
     m.save(output_path)
-    print(f"Zone risk map saved: {output_path}")
+    logger.info("Zone risk map saved: %s", output_path)
 
     return m

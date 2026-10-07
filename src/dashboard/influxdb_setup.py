@@ -1,100 +1,85 @@
 """
 InfluxDB Setup Script
 ======================
-Initializes InfluxDB connection, verifies bucket exists,
-and confirms connectivity for the crop disease detection system.
+Verifies InfluxDB connectivity and the bucket, and can mint least-privilege
+tokens so the services never run with the admin token:
+
+    python -m src.dashboard.influxdb_setup                  # verify only
+    python -m src.dashboard.influxdb_setup --create-tokens  # + scoped tokens
+
+--create-tokens prints a write-only token (bridge) and a read-only token
+(Grafana); copy them into .env as INFLUX_WRITE_TOKEN / INFLUX_READ_TOKEN.
+Requires INFLUX_TOKEN (the admin token) in the environment.
 """
 
-import configparser
-import os
+import argparse
+import logging
 import sys
 
+from src.config import load_influx_config
 
-def setup_influxdb(
-    config_path: str = 'config/influxdb.ini'
-) -> bool:
-    """
-    Verify InfluxDB connection and bucket setup.
+logger = logging.getLogger(__name__)
 
-    The Docker Compose auto-provisions the org, bucket, and token via
-    environment variables. This script verifies everything is accessible.
 
-    Parameters
-    ----------
-    config_path : str
-        Path to InfluxDB configuration file.
-
-    Returns
-    -------
-    bool
-        True if setup is successful.
-    """
+def setup_influxdb(config_path: str = 'config/influxdb.ini', create_tokens: bool = False) -> bool:
+    """Check health and bucket; optionally create scoped tokens. Returns success."""
     from influxdb_client import InfluxDBClient
+    from influxdb_client.domain.bucket_retention_rules import BucketRetentionRules
 
-    config = configparser.ConfigParser()
-    config.read(config_path)
-
-    url = config.get('influxdb', 'url', fallback='http://localhost:8086')
-    token = config.get('influxdb', 'token', fallback='crop-disease-detection-token')
-    org = config.get('influxdb', 'org', fallback='crop-org')
-    bucket = config.get('influxdb', 'bucket', fallback='crop_data')
-
-    print(f"InfluxDB Setup")
-    print(f"  URL:    {url}")
-    print(f"  Org:    {org}")
-    print(f"  Bucket: {bucket}")
-    print(f"  Token:  {token[:10]}...{token[-4:]}")
+    cfg = load_influx_config(config_path)
+    if not cfg['token']:
+        logger.error("INFLUX_TOKEN is not set (see .env.example)")
+        return False
+    logger.info("InfluxDB %s | org=%s bucket=%s", cfg['url'], cfg['org'], cfg['bucket'])
 
     try:
-        client = InfluxDBClient(url=url, token=token, org=org)
+        with InfluxDBClient(url=cfg['url'], token=cfg['token'], org=cfg['org']) as client:
+            health = client.health()
+            if health.status != 'pass':
+                logger.error("InfluxDB health check failed: %s", health.message)
+                return False
 
-        # Check health
-        health = client.health()
-        print(f"\n  Health: {health.status}")
-        if health.status != 'pass':
-            print(f"  ERROR: InfluxDB health check failed: {health.message}")
-            return False
+            buckets_api = client.buckets_api()
+            bucket = buckets_api.find_bucket_by_name(cfg['bucket'])
+            if bucket is None:
+                logger.info("Bucket '%s' not found; creating (30-day retention)", cfg['bucket'])
+                bucket = buckets_api.create_bucket(
+                    bucket_name=cfg['bucket'], org=cfg['org'],
+                    retention_rules=BucketRetentionRules(type='expire',
+                                                         every_seconds=30 * 24 * 3600))
+            logger.info("Bucket '%s' ready (id %s)", cfg['bucket'], bucket.id)
 
-        # Check if bucket exists
-        buckets_api = client.buckets_api()
-        target_bucket = buckets_api.find_bucket_by_name(bucket)
-
-        if target_bucket:
-            print(f"  Bucket '{bucket}' exists (ID: {target_bucket.id})")
-        else:
-            print(f"  Bucket '{bucket}' not found. Creating...")
-            from influxdb_client.domain.bucket_retention_rules import BucketRetentionRules
-            retention = BucketRetentionRules(type='expire', every_seconds=0)  # infinite
-            buckets_api.create_bucket(
-                bucket_name=bucket,
-                retention_rules=retention,
-                org=org
-            )
-            print(f"  Bucket '{bucket}' created successfully")
-
-        # Test write
-        from influxdb_client import Point
-        from influxdb_client.client.write_api import SYNCHRONOUS
-
-        write_api = client.write_api(write_options=SYNCHRONOUS)
-        test_point = Point("system_test").field("status", "ok")
-        write_api.write(bucket=bucket, org=org, record=test_point)
-        print(f"  Test write: SUCCESS")
-
-        write_api.close()
-        client.close()
-
-        print(f"\n✅ InfluxDB setup verified successfully!")
+            if create_tokens:
+                _create_scoped_tokens(client, bucket)
         return True
-
-    except Exception as e:
-        print(f"\n❌ InfluxDB setup failed: {e}")
-        print("\nMake sure InfluxDB is running:")
-        print("  docker compose up -d")
+    except Exception as exc:
+        logger.error("InfluxDB setup failed: %s (is it running? docker compose up -d)", exc)
         return False
 
 
+def _create_scoped_tokens(client, bucket) -> None:
+    from influxdb_client import Permission, PermissionResource
+
+    org_id = bucket.org_id
+    resource = PermissionResource(type='buckets', id=bucket.id, org_id=org_id)
+    auth_api = client.authorizations_api()
+    write = auth_api.create_authorization(
+        org_id=org_id, permissions=[Permission(action='write', resource=resource)])
+    read = auth_api.create_authorization(
+        org_id=org_id, permissions=[Permission(action='read', resource=resource)])
+    print("\nAdd these to your .env (shown once; store them securely):")
+    print(f"INFLUX_WRITE_TOKEN={write.token}")
+    print(f"INFLUX_READ_TOKEN={read.token}")
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s | %(message)s')
+    parser = argparse.ArgumentParser(description='Verify / prepare InfluxDB')
+    parser.add_argument('--config', default='config/influxdb.ini')
+    parser.add_argument('--create-tokens', action='store_true')
+    args = parser.parse_args()
+    sys.exit(0 if setup_influxdb(args.config, create_tokens=args.create_tokens) else 1)
+
+
 if __name__ == '__main__':
-    config_path = sys.argv[1] if len(sys.argv) > 1 else 'config/influxdb.ini'
-    success = setup_influxdb(config_path)
-    sys.exit(0 if success else 1)
+    main()

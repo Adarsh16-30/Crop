@@ -1,0 +1,2 @@
+# The single service account may publish and subscribe only to crop/ topics.
+pattern readwrite crop/#

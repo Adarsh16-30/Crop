@@ -3,7 +3,10 @@
     "list": [
       {
         "builtIn": 1,
-        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
         "enable": true,
         "hide": true,
         "iconColor": "rgba(0, 211, 255, 1)",
@@ -24,11 +27,21 @@
       "title": "🌾 Spectral Band Time Series",
       "description": "Real-time spectral reflectance values from all 6 sensor bands",
       "type": "timeseries",
-      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 0 },
-      "datasource": { "type": "influxdb", "uid": "" },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
@@ -37,27 +50,65 @@
             "pointSize": 3,
             "showPoints": "auto"
           },
-          "unit": "percentunit"
+          "unit": "percentunit",
+          "noValue": "No data - start the publisher and bridge"
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "red_edge_705" },
-            "properties": [{ "id": "color", "value": { "fixedColor": "#e74c3c", "mode": "fixed" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "red_edge_705"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#e74c3c",
+                  "mode": "fixed"
+                }
+              }
+            ]
           },
           {
-            "matcher": { "id": "byName", "options": "nir_842" },
-            "properties": [{ "id": "color", "value": { "fixedColor": "#2ecc71", "mode": "fixed" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "nir_842"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#2ecc71",
+                  "mode": "fixed"
+                }
+              }
+            ]
           },
           {
-            "matcher": { "id": "byName", "options": "swir_1610" },
-            "properties": [{ "id": "color", "value": { "fixedColor": "#3498db", "mode": "fixed" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "swir_1610"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3498db",
+                  "mode": "fixed"
+                }
+              }
+            ]
           }
         ]
       },
       "targets": [
         {
-          "query": "from(bucket: \"crop_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"spectral_readings\")\n  |> filter(fn: (r) => r[\"_field\"] == \"red_edge_705\" or r[\"_field\"] == \"red_edge_740\" or r[\"_field\"] == \"red_edge_783\" or r[\"_field\"] == \"nir_842\" or r[\"_field\"] == \"swir_1610\" or r[\"_field\"] == \"swir_2190\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"bands\")",
-          "refId": "A"
+          "query": "from(bucket: \"crop_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"spectral_readings\")\n  |> filter(fn: (r) => r[\"station_id\"] =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"red_edge_705\" or r[\"_field\"] == \"red_edge_740\" or r[\"_field\"] == \"red_edge_783\" or r[\"_field\"] == \"nir_842\" or r[\"_field\"] == \"swir_1610\" or r[\"_field\"] == \"swir_2190\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"bands\")",
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          }
         }
       ]
     },
@@ -66,61 +117,134 @@
       "title": "📊 Vegetation Index Gauges",
       "description": "Current NDRE, NDVI, and MSI values — key disease stress indicators",
       "type": "gauge",
-      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 0 },
-      "datasource": { "type": "influxdb", "uid": "" },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      },
       "fieldConfig": {
         "defaults": {
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "orange", "value": 0.3 },
-              { "color": "yellow", "value": 0.5 },
-              { "color": "green", "value": 0.7 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.3
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.7
+              }
             ]
           },
           "min": -1,
           "max": 1,
-          "decimals": 3
+          "decimals": 3,
+          "noValue": "No data - start the publisher and bridge"
         }
       },
       "targets": [
         {
-          "query": "from(bucket: \"crop_data\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"spectral_readings\")\n  |> filter(fn: (r) => r[\"_field\"] == \"NDRE\" or r[\"_field\"] == \"NDVI\" or r[\"_field\"] == \"MSI\")\n  |> last()\n  |> yield(name: \"indices\")",
-          "refId": "A"
+          "query": "from(bucket: \"crop_data\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"spectral_readings\")\n  |> filter(fn: (r) => r[\"station_id\"] =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"NDRE\" or r[\"_field\"] == \"NDVI\" or r[\"_field\"] == \"MSI\")\n  |> last()\n  |> yield(name: \"indices\")",
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          }
         }
       ]
     },
     {
       "id": 3,
       "title": "🔬 Disease Prediction Distribution",
-      "description": "Distribution of predicted disease classes across all readings",
+      "description": "Number of completed-cycle predictions per class",
       "type": "piechart",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 10 },
-      "datasource": { "type": "influxdb", "uid": "" },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 10
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" }
+          "color": {
+            "mode": "palette-classic"
+          },
+          "noValue": "No data - start the publisher and bridge"
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "Healthy" },
-            "properties": [{ "id": "color", "value": { "fixedColor": "#2ecc71", "mode": "fixed" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "Healthy"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#2ecc71",
+                  "mode": "fixed"
+                }
+              }
+            ]
           },
           {
-            "matcher": { "id": "byName", "options": "Early Stress" },
-            "properties": [{ "id": "color", "value": { "fixedColor": "#f39c12", "mode": "fixed" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "Early Stress"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#f39c12",
+                  "mode": "fixed"
+                }
+              }
+            ]
           },
           {
-            "matcher": { "id": "byName", "options": "Active Disease" },
-            "properties": [{ "id": "color", "value": { "fixedColor": "#e74c3c", "mode": "fixed" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "Active Disease"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#e74c3c",
+                  "mode": "fixed"
+                }
+              }
+            ]
           }
         ]
       },
       "targets": [
         {
-          "query": "from(bucket: \"crop_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"disease_predictions\")\n  |> filter(fn: (r) => r[\"_field\"] == \"label_name\")\n  |> group()\n  |> count()\n  |> yield(name: \"distribution\")",
-          "refId": "A"
+          "query": "from(bucket: \"crop_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"disease_predictions\")\n  |> filter(fn: (r) => r[\"station_id\"] =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"label_name\")\n  |> map(fn: (r) => ({r with label: r._value}))\n  |> group(columns: [\"label\"])\n  |> count()\n  |> map(fn: (r) => ({_value: r._value, label: r.label}))\n  |> yield(name: \"distribution\")",
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          }
         }
       ]
     },
@@ -129,35 +253,65 @@
       "title": "⚠️ Risk Score Over Time",
       "description": "Disease risk score trend — alerts trigger when score exceeds 0.7",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 10 },
-      "datasource": { "type": "influxdb", "uid": "" },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 10
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "#e74c3c" },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e74c3c"
+          },
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
             "lineWidth": 2,
             "fillOpacity": 20,
-            "thresholdsStyle": { "mode": "area" }
+            "thresholdsStyle": {
+              "mode": "area"
+            }
           },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 0.3 },
-              { "color": "orange", "value": 0.5 },
-              { "color": "red", "value": 0.7 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.3
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "red",
+                "value": 0.7
+              }
             ]
           },
           "min": 0,
-          "max": 1
+          "max": 1,
+          "noValue": "No data - start the publisher and bridge"
         }
       },
       "targets": [
         {
-          "query": "from(bucket: \"crop_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"disease_predictions\")\n  |> filter(fn: (r) => r[\"_field\"] == \"risk_score\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"risk\")",
-          "refId": "A"
+          "query": "from(bucket: \"crop_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"disease_predictions\")\n  |> filter(fn: (r) => r[\"station_id\"] =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"risk_score\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"risk\")",
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          }
         }
       ]
     },
@@ -166,14 +320,26 @@
       "title": "🎯 Prediction Confidence",
       "description": "Histogram of model prediction confidence values",
       "type": "histogram",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 10 },
-      "datasource": { "type": "influxdb", "uid": "" },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 10
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "#3498db" },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3498db"
+          },
           "custom": {
             "fillOpacity": 80
-          }
+          },
+          "noValue": "No data - start the publisher and bridge"
         }
       },
       "options": {
@@ -182,8 +348,12 @@
       },
       "targets": [
         {
-          "query": "from(bucket: \"crop_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"disease_predictions\")\n  |> filter(fn: (r) => r[\"_field\"] == \"confidence\")\n  |> yield(name: \"confidence\")",
-          "refId": "A"
+          "query": "from(bucket: \"crop_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"disease_predictions\")\n  |> filter(fn: (r) => r[\"station_id\"] =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"confidence\")\n  |> yield(name: \"confidence\")",
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          }
         }
       ]
     },
@@ -192,8 +362,16 @@
       "title": "📈 NDRE vs NDVI Correlation",
       "description": "Vegetation index correlation — divergence indicates stress",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
-      "datasource": { "type": "influxdb", "uid": "" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      },
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -201,23 +379,50 @@
             "lineInterpolation": "smooth",
             "lineWidth": 2,
             "fillOpacity": 5
-          }
+          },
+          "noValue": "No data - start the publisher and bridge"
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "NDRE" },
-            "properties": [{ "id": "color", "value": { "fixedColor": "#9b59b6", "mode": "fixed" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "NDRE"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#9b59b6",
+                  "mode": "fixed"
+                }
+              }
+            ]
           },
           {
-            "matcher": { "id": "byName", "options": "NDVI" },
-            "properties": [{ "id": "color", "value": { "fixedColor": "#1abc9c", "mode": "fixed" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "NDVI"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#1abc9c",
+                  "mode": "fixed"
+                }
+              }
+            ]
           }
         ]
       },
       "targets": [
         {
-          "query": "from(bucket: \"crop_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"spectral_readings\")\n  |> filter(fn: (r) => r[\"_field\"] == \"NDRE\" or r[\"_field\"] == \"NDVI\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"indices\")",
-          "refId": "A"
+          "query": "from(bucket: \"crop_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"spectral_readings\")\n  |> filter(fn: (r) => r[\"station_id\"] =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"NDRE\" or r[\"_field\"] == \"NDVI\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"indices\")",
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          }
         }
       ]
     },
@@ -226,25 +431,47 @@
       "title": "💧 Moisture Stress Index (MSI)",
       "description": "SWIR/NIR ratio — higher values indicate water stress",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 18 },
-      "datasource": { "type": "influxdb", "uid": "" },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 18
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      },
       "fieldConfig": {
         "defaults": {
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 0.3 },
-              { "color": "red", "value": 0.5 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.3
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
             ]
           },
-          "decimals": 4
+          "decimals": 4,
+          "noValue": "No data - start the publisher and bridge"
         }
       },
       "targets": [
         {
-          "query": "from(bucket: \"crop_data\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"spectral_readings\")\n  |> filter(fn: (r) => r[\"_field\"] == \"MSI\")\n  |> last()\n  |> yield(name: \"msi\")",
-          "refId": "A"
+          "query": "from(bucket: \"crop_data\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"spectral_readings\")\n  |> filter(fn: (r) => r[\"station_id\"] =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"MSI\")\n  |> last()\n  |> yield(name: \"msi\")",
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          }
         }
       ]
     },
@@ -253,24 +480,46 @@
       "title": "🌡️ Latest Prediction Summary",
       "description": "Most recent disease prediction with label and confidence",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 18 },
-      "datasource": { "type": "influxdb", "uid": "" },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 18
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      },
       "fieldConfig": {
         "defaults": {
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 0.5 },
-              { "color": "red", "value": 0.7 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "red",
+                "value": 0.7
+              }
             ]
-          }
+          },
+          "noValue": "No data - start the publisher and bridge"
         }
       },
       "targets": [
         {
-          "query": "from(bucket: \"crop_data\")\n  |> range(start: -10m)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"disease_predictions\")\n  |> filter(fn: (r) => r[\"_field\"] == \"risk_score\" or r[\"_field\"] == \"confidence\")\n  |> last()\n  |> yield(name: \"latest\")",
-          "refId": "A"
+          "query": "from(bucket: \"crop_data\")\n  |> range(start: -10m)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"disease_predictions\")\n  |> filter(fn: (r) => r[\"station_id\"] =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"risk_score\" or r[\"_field\"] == \"confidence\")\n  |> last()\n  |> yield(name: \"latest\")",
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          }
         }
       ]
     },
@@ -279,8 +528,16 @@
       "title": "📊 Class Probabilities Over Time",
       "description": "Model output probabilities for each disease class",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
-      "datasource": { "type": "influxdb", "uid": "" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      },
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -288,51 +545,173 @@
             "lineInterpolation": "smooth",
             "lineWidth": 2,
             "fillOpacity": 15,
-            "stacking": { "mode": "normal" }
+            "stacking": {
+              "mode": "normal"
+            }
           },
           "min": 0,
-          "max": 1
+          "max": 1,
+          "noValue": "No data - start the publisher and bridge"
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "prob_class_0" },
+            "matcher": {
+              "id": "byName",
+              "options": "prob_class_0"
+            },
             "properties": [
-              { "id": "displayName", "value": "P(Healthy)" },
-              { "id": "color", "value": { "fixedColor": "#2ecc71", "mode": "fixed" } }
+              {
+                "id": "displayName",
+                "value": "P(Healthy)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#2ecc71",
+                  "mode": "fixed"
+                }
+              }
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "prob_class_1" },
+            "matcher": {
+              "id": "byName",
+              "options": "prob_class_1"
+            },
             "properties": [
-              { "id": "displayName", "value": "P(Early Stress)" },
-              { "id": "color", "value": { "fixedColor": "#f39c12", "mode": "fixed" } }
+              {
+                "id": "displayName",
+                "value": "P(Early Stress)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#f39c12",
+                  "mode": "fixed"
+                }
+              }
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "prob_class_2" },
+            "matcher": {
+              "id": "byName",
+              "options": "prob_class_2"
+            },
             "properties": [
-              { "id": "displayName", "value": "P(Active Disease)" },
-              { "id": "color", "value": { "fixedColor": "#e74c3c", "mode": "fixed" } }
+              {
+                "id": "displayName",
+                "value": "P(Active Disease)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#e74c3c",
+                  "mode": "fixed"
+                }
+              }
             ]
           }
         ]
       },
       "targets": [
         {
-          "query": "from(bucket: \"crop_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"disease_predictions\")\n  |> filter(fn: (r) => r[\"_field\"] == \"prob_class_0\" or r[\"_field\"] == \"prob_class_1\" or r[\"_field\"] == \"prob_class_2\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"probs\")",
-          "refId": "A"
+          "query": "from(bucket: \"crop_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"disease_predictions\")\n  |> filter(fn: (r) => r[\"station_id\"] =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"prob_class_0\" or r[\"_field\"] == \"prob_class_1\" or r[\"_field\"] == \"prob_class_2\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"probs\")",
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          }
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Bridge health (processed / predictions / invalid payloads / write errors)",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "Bridge not running"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"crop_data\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"bridge_stats\")\n  |> last()"
         }
       ]
     }
   ],
   "refresh": "5s",
   "schemaVersion": 39,
-  "tags": ["crop-disease", "spectral", "quantum"],
-  "templating": { "list": [] },
-  "time": { "from": "now-30m", "to": "now" },
+  "tags": [
+    "crop-disease",
+    "spectral",
+    "quantum"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "station",
+        "label": "Station",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb-crop"
+        },
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"crop_data\", tag: \"station_id\")",
+        "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"crop_data\", tag: \"station_id\")",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "refresh": 2,
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [],
+        "hide": 0
+      }
+    ]
+  },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "",
-  "title": "🌱 Quantum Crop Disease Detection",
+  "title": "Crop Disease Detection (simulated sensors)",
   "uid": "crop-disease-main",
   "version": 1
 }

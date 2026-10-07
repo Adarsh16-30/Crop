@@ -1,21 +1,35 @@
-version: "3.9"
+# Secrets come from .env (copy .env.example). Ports are bound to 127.0.0.1
+# so the stack is not reachable from other machines by default.
+#
+#   docker compose up -d                      # infrastructure only
+#   docker compose --profile app up -d        # + API, bridge, simulator
+
+x-app: &app
+  build: .
+  image: crop-disease-app:latest
+  env_file: .env
+  environment:
+    MQTT_HOST: mosquitto
+    INFLUX_URL: http://influxdb:8086
+  volumes:
+    - ./models/checkpoints:/app/models/checkpoints:ro
+  restart: unless-stopped
+  profiles: ["app"]
 
 services:
-  # ────────────────────────────────────────────
-  # InfluxDB 2.x — Time-series database
-  # ────────────────────────────────────────────
   influxdb:
-    image: influxdb:2.7
+    image: influxdb:2.7.11
     container_name: crop-influxdb
     ports:
-      - "8086:8086"
+      - "127.0.0.1:8086:8086"
     environment:
-      - DOCKER_INFLUXDB_INIT_MODE=setup
-      - DOCKER_INFLUXDB_INIT_USERNAME=admin
-      - DOCKER_INFLUXDB_INIT_PASSWORD=cropdetection2024
-      - DOCKER_INFLUXDB_INIT_ORG=crop-org
-      - DOCKER_INFLUXDB_INIT_BUCKET=crop_data
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=crop-disease-detection-token
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_ADMIN_USER:?set in .env}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_ADMIN_PASSWORD:?set in .env}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-crop-org}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_BUCKET:-crop_data}
+      DOCKER_INFLUXDB_INIT_RETENTION: 30d
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:?set in .env}
     volumes:
       - influxdb_data:/var/lib/influxdb2
       - influxdb_config:/etc/influxdb2
@@ -26,45 +40,77 @@ services:
       timeout: 5s
       retries: 5
 
-  # ────────────────────────────────────────────
-  # Grafana OSS — Dashboard & visualization
-  # ────────────────────────────────────────────
   grafana:
     image: grafana/grafana-oss:10.4.0
     container_name: crop-grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=cropdetection
-      - GF_INSTALL_PLUGINS=
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?set in .env}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set in .env}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      INFLUX_ORG: ${INFLUX_ORG:-crop-org}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-crop_data}
+      # Prefer the read-only token; falls back to the admin token until
+      # `python -m src.dashboard.influxdb_setup --create-tokens` has been run.
+      INFLUX_READ_TOKEN: ${INFLUX_READ_TOKEN:-${INFLUX_TOKEN}}
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./src/dashboard/grafana/datasources:/etc/grafana/provisioning/datasources
-      - ./src/dashboard/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./src/dashboard/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./src/dashboard/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./src/dashboard/grafana/alerting:/etc/grafana/provisioning/alerting:ro
     depends_on:
       influxdb:
         condition: service_healthy
     restart: unless-stopped
 
-  # ────────────────────────────────────────────
-  # Eclipse Mosquitto — MQTT broker
-  # ────────────────────────────────────────────
   mosquitto:
-    image: eclipse-mosquitto:2.0
+    image: eclipse-mosquitto:2.0.20
     container_name: crop-mosquitto
     ports:
-      - "1883:1883"
-      - "9001:9001"
+      - "127.0.0.1:1883:1883"
+    environment:
+      MQTT_USERNAME: ${MQTT_USERNAME:?set in .env}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?set in .env}
+    # Build the hashed password file from the env credentials, then start.
+    command: >
+      sh -c 'mosquitto_passwd -c -b /mosquitto/data/passwd "$$MQTT_USERNAME" "$$MQTT_PASSWORD"
+      && chmod 0700 /mosquitto/data/passwd
+      && exec mosquitto -c /mosquitto/config/mosquitto.conf'
     volumes:
-      - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./config/mosquitto.acl:/mosquitto/config/acl:ro
       - mosquitto_data:/mosquitto/data
-      - mosquitto_log:/mosquitto/log
     restart: unless-stopped
+
+  api:
+    <<: *app
+    container_name: crop-api
+    command: ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  bridge:
+    <<: *app
+    container_name: crop-bridge
+    command: ["python", "-m", "src.dashboard.mqtt_subscriber",
+              "--model-path", "models/checkpoints/lstm_best.pt"]
+    depends_on: [mosquitto, influxdb]
+
+  simulator:
+    <<: *app
+    container_name: crop-simulator
+    command: ["python", "-m", "src.data.mqtt_publisher", "--profile", "mixed"]
+    depends_on: [mosquitto]
 
 volumes:
   influxdb_data:
   influxdb_config:
   grafana_data:
   mosquitto_data:
-  mosquitto_log:

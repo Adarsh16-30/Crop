@@ -1,33 +1,70 @@
 """
-Quantum / Simulated Annealing Optimizer
-========================================
-Solves the QUBO feature selection problem using:
-    1. D-Wave Neal Simulated Annealing (primary)
-    2. Qiskit QAOA (optional, for small problems ≤15 features)
-    3. SciPy brute-force fallback (for very small problems)
+QUBO Solvers
+============
+1. Simulated annealing via `dwave.samplers` (falls back to the deprecated
+   `neal` package if that is all that is installed).
+2. Qiskit QAOA on a statevector simulator (small problems only).
+3. Pure-numpy fallback: exact brute force for n <= 20, otherwise a
+   multi-start greedy + single-flip local search.
 
-All solvers return a list of selected feature indices.
+All solvers return a sorted list of selected feature indices.
 """
+
+import logging
 
 import numpy as np
 
-# Try importing D-Wave Neal
-NEAL_AVAILABLE = False
-try:
-    import neal
-    NEAL_AVAILABLE = True
-except ImportError:
-    pass
+logger = logging.getLogger(__name__)
 
-# Try importing Qiskit for QAOA
+SA_BACKEND = None
+try:
+    from dwave.samplers import SimulatedAnnealingSampler
+    SA_BACKEND = 'dwave.samplers'
+except ImportError:
+    try:
+        from neal import SimulatedAnnealingSampler  # deprecated upstream
+        SA_BACKEND = 'neal'
+    except ImportError:
+        SimulatedAnnealingSampler = None
+
 QISKIT_AVAILABLE = False
 try:
-    from qiskit_optimization.algorithms import MinimumEigenOptimizer
-    from qiskit_algorithms import QAOA
     from qiskit.primitives import StatevectorSampler
+    from qiskit_algorithms import QAOA
+    from qiskit_algorithms.optimizers import COBYLA
+    from qiskit_optimization.algorithms import MinimumEigenOptimizer
     QISKIT_AVAILABLE = True
 except ImportError:
     pass
+
+# Kept for backwards compatibility with callers checking this flag.
+NEAL_AVAILABLE = SA_BACKEND is not None
+BRUTE_FORCE_MAX_VARS = 20
+
+
+def _num_vars(qubo: dict[tuple[int, int], float]) -> int:
+    return max((max(i, j) for i, j in qubo), default=-1) + 1
+
+
+def _to_matrix(qubo: dict[tuple[int, int], float], n: int) -> np.ndarray:
+    Q = np.zeros((n, n))
+    for (i, j), w in qubo.items():
+        Q[i, j] += w
+    return Q
+
+
+def _energy(Q: np.ndarray, x: np.ndarray) -> float:
+    return float(x @ Q @ x)
+
+
+def _repair(selected: list[int], qubo: dict, max_features: int | None) -> list[int]:
+    """Last-resort trim if a solver still returns more than max_features."""
+    if max_features is None or len(selected) <= max_features:
+        return sorted(selected)
+    logger.warning("Solver returned %d features (> %d); trimming by relevance",
+                   len(selected), max_features)
+    ranked = sorted(selected, key=lambda idx: qubo.get((idx, idx), 0.0))
+    return sorted(ranked[:max_features])
 
 
 def run_simulated_annealing(
@@ -37,175 +74,95 @@ def run_simulated_annealing(
     seed: int = 42,
     max_features: int | None = None
 ) -> list[int]:
-    """
-    Solve QUBO using D-Wave's Neal Simulated Annealing sampler.
+    """Solve a QUBO by simulated annealing; numpy fallback if no sampler is installed."""
+    if SimulatedAnnealingSampler is None:
+        logger.warning("No simulated-annealing package installed; using numpy fallback")
+        return numpy_fallback(qubo_matrix, max_features=max_features, seed=seed)
 
-    Parameters
-    ----------
-    qubo_matrix : dict
-        QUBO dictionary of {(i, j): weight} pairs.
-    n_reads : int
-        Number of annealing runs.
-    num_sweeps : int
-        Number of sweeps per run.
-    seed : int
-        Random seed.
-
-    Returns
-    -------
-    list[int]
-        Indices of selected features (where x_i = 1).
-    """
-    if NEAL_AVAILABLE:
-        sampler = neal.SimulatedAnnealingSampler()
-        response = sampler.sample_qubo(
-            qubo_matrix,
-            num_reads=n_reads,
-            num_sweeps=num_sweeps,
-            seed=seed
-        )
-        best_sample = response.first.sample
-        selected = [k for k, v in sorted(best_sample.items()) if v == 1]
-        if max_features is not None and len(selected) > max_features:
-            # Diagonal value = -relevance (more negative = more relevant), so
-            # an ascending sort ranks the most relevant features first.
-            ranked = sorted(
-                selected,
-                key=lambda idx: qubo_matrix.get((idx, idx), 0.0)
-            )
-            selected = ranked[:max_features]
-        energy = response.first.energy
-
-        print(f"Simulated Annealing Result:")
-        print(f"  Selected features: {selected}")
-        print(f"  Energy: {energy:.4f}")
-        print(f"  Num reads: {n_reads}, Num sweeps: {num_sweeps}")
-
-        return selected
-    else:
-        print("WARNING: D-Wave Neal not available. Using scipy fallback.")
-        return _scipy_fallback(qubo_matrix, max_features=max_features)
+    response = SimulatedAnnealingSampler().sample_qubo(
+        qubo_matrix, num_reads=n_reads, num_sweeps=num_sweeps, seed=seed
+    )
+    selected = [k for k, v in response.first.sample.items() if v == 1]
+    logger.info("Simulated annealing (%s): %d selected, energy %.4f, %d reads x %d sweeps",
+                SA_BACKEND, len(selected), response.first.energy, n_reads, num_sweeps)
+    return _repair(selected, qubo_matrix, max_features)
 
 
-def run_qaoa(
-    qubo_problem,
-    reps: int = 2,
-    max_features: int = 15
-) -> list[int]:
-    """
-    Solve QUBO using Qiskit QAOA (for small problems only).
-
-    Parameters
-    ----------
-    qubo_problem : QuadraticProgram
-        Qiskit QuadraticProgram instance.
-    reps : int
-        Number of QAOA repetitions.
-    max_features : int
-        Safety limit — refuse problems larger than this.
-
-    Returns
-    -------
-    list[int]
-        Selected feature indices.
-    """
+def run_qaoa(qubo_problem, reps: int = 2, max_vars: int = 15, seed: int = 42) -> list[int]:
+    """Solve a Qiskit QuadraticProgram with QAOA on a statevector simulator."""
     if not QISKIT_AVAILABLE:
         raise RuntimeError("Qiskit is not available. Install qiskit-algorithms "
-                          "and qiskit-optimization.")
-
+                           "and qiskit-optimization.")
     n_vars = qubo_problem.get_num_vars()
-    if n_vars > max_features:
-        raise ValueError(
-            f"QAOA is impractical for {n_vars} variables (limit: {max_features}). "
-            f"Use simulated annealing instead."
-        )
+    if n_vars > max_vars:
+        raise ValueError(f"QAOA is impractical for {n_vars} variables (limit {max_vars}).")
 
-    print(f"Running QAOA with {reps} repetitions on {n_vars} variables...")
-
-    sampler = StatevectorSampler()
-    qaoa = QAOA(sampler=sampler, reps=reps)
-    optimizer = MinimumEigenOptimizer(qaoa)
-    result = optimizer.solve(qubo_problem)
-
-    selected = [i for i, v in enumerate(result.x) if v == 1]
-
-    print(f"QAOA Result:")
-    print(f"  Selected features: {selected}")
-    print(f"  Objective value: {result.fval:.4f}")
-    print(f"  Status: {result.status}")
-
+    logger.info("Running QAOA (reps=%d) on %d variables", reps, n_vars)
+    qaoa = QAOA(sampler=StatevectorSampler(seed=seed), optimizer=COBYLA(maxiter=200), reps=reps)
+    result = MinimumEigenOptimizer(qaoa).solve(qubo_problem)
+    selected = [i for i, v in enumerate(result.x) if round(v) == 1]
+    logger.info("QAOA: selected %s, objective %.4f, status %s", selected, result.fval,
+                result.status)
     return selected
 
 
-def _scipy_fallback(
+def numpy_fallback(
     qubo_matrix: dict[tuple[int, int], float],
-    max_features: int | None = None
+    max_features: int | None = None,
+    seed: int = 42,
+    n_starts: int = 50
 ) -> list[int]:
     """
-    Brute-force QUBO solver for small problems using numpy.
-
-    Evaluates all 2^n binary combinations. Only practical for n ≤ 20.
-
-    Parameters
-    ----------
-    qubo_matrix : dict
-        QUBO dictionary.
-
-    Returns
-    -------
-    list[int]
-        Selected feature indices.
+    Exact brute force for n <= 20; otherwise multi-start greedy descent with
+    single-bit-flip local search (no exponential blow-up).
     """
-    # Determine number of variables
-    all_vars = set()
-    for (i, j) in qubo_matrix.keys():
-        all_vars.add(i)
-        all_vars.add(j)
-    n = max(all_vars) + 1 if all_vars else 0
+    n = _num_vars(qubo_matrix)
+    if n == 0:
+        return []
+    Q = _to_matrix(qubo_matrix, n)
 
-    if n > 20:
-        raise ValueError(f"Brute-force is impractical for {n} variables. "
-                        f"Install dwave-neal for simulated annealing.")
+    if n <= BRUTE_FORCE_MAX_VARS:
+        states = ((np.arange(2 ** n)[:, None] >> np.arange(n)) & 1).astype(float)
+        energies = np.einsum('si,ij,sj->s', states, Q, states)
+        best = states[int(np.argmin(energies))]
+        logger.info("Brute force over %d variables: energy %.4f", n, energies.min())
+    else:
+        rng = np.random.default_rng(seed)
+        best, best_e = None, np.inf
+        for _ in range(n_starts):
+            x = (rng.random(n) < 0.5).astype(float)
+            improved = True
+            while improved:
+                improved = False
+                for i in rng.permutation(n):
+                    x_flip = x.copy()
+                    x_flip[i] = 1 - x_flip[i]
+                    if _energy(Q, x_flip) < _energy(Q, x) - 1e-12:
+                        x, improved = x_flip, True
+            e = _energy(Q, x)
+            if e < best_e:
+                best, best_e = x, e
+        logger.info("Local search over %d variables: energy %.4f", n, best_e)
 
-    print(f"Scipy fallback: brute-force search over {n} variables ({2**n} states)...")
+    selected = [i for i in range(n) if best[i] == 1]
+    return _repair(selected, qubo_matrix, max_features)
 
-    best_energy = float('inf')
-    best_state = None
 
-    for state_int in range(2 ** n):
-        # Convert integer to binary vector
-        x = np.array([(state_int >> bit) & 1 for bit in range(n)])
-
-        # Evaluate QUBO energy
-        energy = 0.0
-        for (i, j), weight in qubo_matrix.items():
-            energy += weight * x[i] * x[j]
-
-        if energy < best_energy:
-            best_energy = energy
-            best_state = x.copy()
-
-    selected = [i for i in range(n) if best_state[i] == 1]
-    if max_features is not None and len(selected) > max_features:
-        # Diagonal value = -relevance (more negative = more relevant), so
-        # an ascending sort ranks the most relevant features first.
-        ranked = sorted(
-            selected,
-            key=lambda idx: qubo_matrix.get((idx, idx), 0.0)
-        )
-        selected = ranked[:max_features]
-
-    print(f"Brute-force Result:")
-    print(f"  Selected features: {selected}")
-    print(f"  Energy: {best_energy:.4f}")
-
-    return selected
+# Old name, kept so existing imports keep working.
+_scipy_fallback = numpy_fallback
 
 
 def get_solver_info() -> dict:
     """Report which solvers are available."""
+    if SA_BACKEND:
+        recommended = 'simulated_annealing'
+    elif QISKIT_AVAILABLE:
+        recommended = 'qiskit'
+    else:
+        recommended = 'numpy'
     return {
+        'simulated_annealing_backend': SA_BACKEND,
         'neal_available': NEAL_AVAILABLE,
         'qiskit_available': QISKIT_AVAILABLE,
-        'recommended': 'neal' if NEAL_AVAILABLE else ('qiskit' if QISKIT_AVAILABLE else 'scipy')
+        'recommended': recommended,
     }

@@ -1,0 +1,49 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: crop-disease
+    folder: Crop Disease
+    interval: 1m
+    rules:
+      - uid: crop-high-risk
+        title: High disease risk at a station
+        condition: C
+        for: 0m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: "Station {{ $labels.station_id }} predicted risk {{ $values.B }} (> 0.7)"
+        labels:
+          severity: warning
+        data:
+          - refId: A
+            datasourceUid: influxdb-crop
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: A
+              query: |
+                from(bucket: "crop_data")
+                  |> range(start: -15m)
+                  |> filter(fn: (r) => r["_measurement"] == "disease_predictions")
+                  |> filter(fn: (r) => r["_field"] == "risk_score")
+                  |> group(columns: ["station_id"])
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.7]

@@ -1,12 +1,16 @@
 """
 End-to-End Pipeline Runner
 ============================
-Orchestrates the complete workflow from data generation through
-model training, evaluation, quantum optimization, geo-spatial mapping,
-and dashboard preparation.
+Phase 1  synthetic data generation + preprocessing (one shared split)
+Phase 2  classical models (RF, XGBoost) with random and spatial CV
+Phase 3  deep models (LSTM, CNN-LSTM) with calibration
+Phase 4  quantum-inspired QUBO feature selection vs. classical selectors
+         -> model comparison with 95% CIs and McNemar tests
+Phase 5  geo-spatial risk maps from the best model (by validation macro-F1)
+Phase 6  InfluxDB connectivity check for the live dashboard
 
 Usage:
-    python run_pipeline.py --samples 500 --seq-len 30
+    python run_pipeline.py --samples 1500 --seq-len 30 --epochs 50
     python run_pipeline.py --skip-quantum --skip-mqtt
 """
 
@@ -19,379 +23,288 @@ import time
 import numpy as np
 import pandas as pd
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)-8s | %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('pipeline')
+
+RAW_CSV = 'data/raw/spectral_dataset.csv'
+PROCESSED_DIR = 'data/processed'
+CHECKPOINT_DIR = 'models/checkpoints'
+REPORTS_DIR = 'reports'
+DL_MODELS = ('lstm', 'cnn_lstm')
+DL_DISPLAY = {'lstm': 'LSTM', 'cnn_lstm': 'CNN-LSTM'}
+
+
+def banner(title: str) -> None:
+    logger.info("=" * 60)
+    logger.info(title)
+    logger.info("=" * 60)
 
 
 def phase1_data_foundation(args) -> dict:
-    """Phase 1: Generate synthetic data and preprocess."""
-    logger.info("=" * 60)
-    logger.info("PHASE 1: Data Foundation")
-    logger.info("=" * 60)
-
+    """Generate synthetic data and preprocess it into a single shared split."""
+    banner("PHASE 1: Data Foundation")
     from src.data.data_generator import generate_dataset
-    from src.features.spectral_indices import compute_indices
     from src.data.preprocessor import run_preprocessing_pipeline
 
-    # Generate synthetic dataset
-    logger.info(f"Generating {args.samples} samples with seq_len={args.seq_len}...")
-    dataset = generate_dataset(
-        n_samples=args.samples,
-        seq_len=args.seq_len,
-        seed=args.seed
-    )
+    dataset = generate_dataset(n_samples=args.samples, seq_len=args.seq_len, seed=args.seed)
+    os.makedirs(os.path.dirname(RAW_CSV), exist_ok=True)
+    dataset.to_csv(RAW_CSV, index=False)
+    logger.info("Dataset saved: %s (%d rows)", RAW_CSV, len(dataset))
 
-    os.makedirs('data/raw', exist_ok=True)
-    csv_path = 'data/raw/spectral_dataset.csv'
-    dataset.to_csv(csv_path, index=False)
-    logger.info(f"Dataset saved: {csv_path} ({len(dataset)} rows)")
-
-    # Preprocess
-    splits = run_preprocessing_pipeline(
-        input_csv=csv_path,
-        output_dir='data/processed',
-        seq_len=args.seq_len,
-        seed=args.seed
-    )
-
-    return splits
+    data = run_preprocessing_pipeline(input_csv=RAW_CSV, output_dir=PROCESSED_DIR,
+                                      seq_len=args.seq_len, seed=args.seed)
+    data['sample_meta'] = pd.read_csv(os.path.join(PROCESSED_DIR, 'sample_meta.csv'))
+    return data
 
 
-def phase2_model_training(args, splits: dict) -> list:
-    """Phase 2: Train classical ML and deep learning models."""
-    logger.info("=" * 60)
-    logger.info("PHASE 2: Model Training")
-    logger.info("=" * 60)
-
-    import torch
+def phase2_classical_models(args, data: dict) -> list[dict]:
+    """Train / evaluate RF and XGBoost; report random and spatially grouped CV."""
+    banner("PHASE 2: Classical Models")
+    from src.constants import zone_key
     from src.models.classical_models import (
-        train_random_forest, train_xgboost, evaluate_model, save_model
-    )
-    from src.training.train import (
-        get_device, create_data_loaders, build_model, train_model, load_checkpoint
-    )
-    from src.evaluation.evaluate import (
-        evaluate_dl_model, plot_confusion_matrix, plot_roc_curves,
-        plot_training_curves, compare_models
-    )
-
-    device = get_device()
-    all_results = []
-
-    # ── Classical ML (aggregated features) ────────────
-    logger.info("Training classical ML models (RF, XGBoost)...")
-    X_train_agg = np.load('data/processed/X_train_agg.npy')
-    y_train_agg = np.load('data/processed/y_train_agg.npy')
-    X_test_agg = np.load('data/processed/X_test_agg.npy')
-    y_test_agg = np.load('data/processed/y_test_agg.npy')
-
-    # Random Forest
-    rf = train_random_forest(X_train_agg, y_train_agg)
-    rf_results = evaluate_model(rf, X_test_agg, y_test_agg, model_name='Random Forest')
-    save_model(rf, 'models/checkpoints/rf_model.joblib')
-    all_results.append(rf_results)
-
-    # XGBoost
-    xgb = train_xgboost(X_train_agg, y_train_agg)
-    xgb_results = evaluate_model(xgb, X_test_agg, y_test_agg, model_name='XGBoost')
-    save_model(xgb, 'models/checkpoints/xgb_model.joblib')
-    all_results.append(xgb_results)
-
-    # ── Deep Learning (temporal sequences) ────────────
-    logger.info("Training deep learning models (LSTM, CNN-LSTM)...")
-    X_train = splits['X_train']
-    y_train = splits['y_train']
-    X_val = splits['X_val']
-    y_val = splits['y_val']
-    X_test = splits['X_test']
-    y_test = splits['y_test']
-
-    input_dim = X_train.shape[2]
-    seq_len = X_train.shape[1]
-
-    train_loader, val_loader = create_data_loaders(
-        X_train, y_train, X_val, y_val, batch_size=args.batch_size
+        cross_validate,
+        evaluate_model,
+        make_random_forest,
+        make_xgboost,
+        save_model,
+        train_random_forest,
+        train_xgboost,
     )
 
-    for model_type in ['lstm', 'cnn_lstm']:
-        logger.info(f"Training {model_type}...")
-        model = build_model(
-            model_type=model_type,
-            input_dim=input_dim,
-            seq_len=seq_len,
-            hidden_dim=128,
-            dropout=0.3
-        )
+    X_tr, y_tr = data['X_train_agg'], data['y_train_agg']
+    X_te, y_te = data['X_test_agg'], data['y_test_agg']
 
-        history = train_model(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            device=device,
-            epochs=args.epochs,
-            learning_rate=0.001,
-            patience=10,
-            checkpoint_dir='models/checkpoints',
-            model_name=model_type,
-            log_dir='reports'
-        )
+    # CV on train+val; spatial groups are the generator's ~0.1 degree zones.
+    X_cv = np.concatenate([X_tr, data['X_val_agg']])
+    y_cv = np.concatenate([y_tr, data['y_val_agg']])
+    ids_cv = np.concatenate([data['ids_train_agg'], data['ids_val_agg']])
+    meta = data['sample_meta'].set_index('sample_id').loc[ids_cv]
+    groups = np.array([hash(zone_key(lat, lon)) for lat, lon in zip(meta['lat'], meta['lon'])])
 
-        # Load best checkpoint and evaluate
-        model = build_model(model_type, input_dim, seq_len)
-        model = load_checkpoint(model, f'models/checkpoints/{model_type}_best.pt', device)
+    results, cv_rows = [], []
+    for name, trainer, factory, path in (
+        ('Random Forest', train_random_forest, make_random_forest, 'rf_model.joblib'),
+        ('XGBoost', train_xgboost, make_xgboost, 'xgb_model.joblib'),
+    ):
+        model = trainer(X_tr, y_tr, seed=args.seed)
+        results.append(evaluate_model(model, X_te, y_te, model_name=name))
+        save_model(model, os.path.join(CHECKPOINT_DIR, path))
+        for split_name, grp in (('random', None), ('spatial_zone', groups)):
+            cv = cross_validate(factory(seed=args.seed), X_cv, y_cv, groups=grp, seed=args.seed)
+            cv_rows.append({'model': name, 'cv_split': split_name, **cv})
 
-        dl_results = evaluate_dl_model(
-            model, X_test, y_test, device,
-            model_name=model_type.upper().replace('_', '-')
-        )
-        all_results.append(dl_results)
-
-        # Plot confusion matrix and ROC curves
-        plot_confusion_matrix(
-            dl_results['confusion_matrix'],
-            dl_results['model_name'],
-            f'reports/{model_type}_confusion_matrix.png'
-        )
-        if dl_results['probabilities'] is not None:
-            plot_roc_curves(
-                y_test, dl_results['probabilities'],
-                dl_results['model_name'],
-                f'reports/{model_type}_roc_curves.png'
-            )
-
-        # Plot training curves
-        log_path = f'reports/{model_type}_training_log.csv'
-        if os.path.exists(log_path):
-            plot_training_curves(log_path, f'reports/{model_type}_training_curves.png',
-                               model_name=dl_results['model_name'])
-
-    # Model comparison
-    compare_models(all_results)
-
-    return all_results
-
-
-def phase3_quantum_optimization(args) -> dict | None:
-    """Phase 3: QUBO-based feature selection."""
-    if args.skip_quantum:
-        logger.info("Skipping Phase 3 (quantum optimization)")
-        return None
-
-    logger.info("=" * 60)
-    logger.info("PHASE 3: Quantum Feature Selection")
-    logger.info("=" * 60)
-
-    from src.models.classical_models import load_model
-    from src.quantum.integration import run_quantum_feature_selection
-    from src.features.spectral_indices import get_feature_columns
-
-    rf = load_model('models/checkpoints/rf_model.joblib')
-    X_train_agg = np.load('data/processed/X_train_agg.npy')
-    y_train_agg = np.load('data/processed/y_train_agg.npy')
-    X_test_agg = np.load('data/processed/X_test_agg.npy')
-    y_test_agg = np.load('data/processed/y_test_agg.npy')
-
-    # Feature names: mean + std for each raw + index column
-    base_cols = get_feature_columns(include_raw=True, include_indices=True)
-    feature_names = [f'{c}_mean' for c in base_cols] + [f'{c}_std' for c in base_cols]
-
-    results = run_quantum_feature_selection(
-        rf_model=rf,
-        X_train_agg=X_train_agg,
-        y_train_agg=y_train_agg,
-        X_test_agg=X_test_agg,
-        y_test_agg=y_test_agg,
-        feature_names=feature_names,
-        max_features=8,
-        reports_dir='reports'
-    )
-
+    cv_df = pd.DataFrame(cv_rows)
+    cv_df.to_csv(os.path.join(REPORTS_DIR, 'classical_cv.csv'), index=False)
+    logger.info("Classical CV (random vs spatial zone hold-out):\n%s",
+                cv_df.round(4).to_string(index=False))
     return results
 
 
-def phase4_geospatial_mapping(args) -> None:
-    """Phase 4: Generate geo-spatial risk maps."""
-    logger.info("=" * 60)
-    logger.info("PHASE 4: Geo-Spatial Risk Mapping")
-    logger.info("=" * 60)
-
-    import torch
-    from src.models.lstm_model import SpectralLSTM
-    from src.training.train import load_checkpoint, get_device
-    from src.geospatial.risk_mapper import (
-        build_geodataframe, aggregate_zone_risk, export_geojson, get_risk_summary
+def phase3_deep_models(args, data: dict) -> list[dict]:
+    """Train, calibrate and evaluate the sequence models."""
+    banner("PHASE 3: Deep Learning Models")
+    from src.evaluation.evaluate import (
+        evaluate_dl_model,
+        plot_confusion_matrix,
+        plot_roc_curves,
+        plot_training_curves,
     )
-    from src.geospatial.heatmap import generate_risk_heatmap, generate_zone_map
+    from src.inference.predictor import Predictor
+    from src.training.train import get_device, train_from_arrays
 
     device = get_device()
+    results = []
+    for model_type in args.models:
+        history = train_from_arrays(
+            model_type, data, data['scaler_params'], device, epochs=args.epochs,
+            batch_size=args.batch_size, learning_rate=args.lr,
+            weight_decay=args.weight_decay, hidden_dim=args.hidden_dim,
+            dropout=args.dropout, patience=args.patience, seed=args.seed,
+            checkpoint_dir=CHECKPOINT_DIR, log_dir=REPORTS_DIR
+        )
+        predictor = Predictor(history['checkpoint_path'], device=device)
+        name = DL_DISPLAY[model_type]
+        res = evaluate_dl_model(predictor, data['X_test'], data['y_test'], model_name=name)
+        results.append(res)
 
-    # Load test data and model
-    X_test = np.load('data/processed/X_test.npy')
-    y_test = np.load('data/processed/y_test.npy')
-    ids_test_path = 'data/processed/ids_test.npy'
-    ids_test = np.load(ids_test_path) if os.path.exists(ids_test_path) else None
-
-    # Load original dataset for GPS coordinates
-    raw_df = pd.read_csv('data/raw/spectral_dataset.csv')
-    gps_lookup = raw_df.groupby('sample_id', sort=False)[['lat', 'lon']].first()
-
-    # Load best model
-    model = SpectralLSTM(input_dim=X_test.shape[2], hidden_dim=128,
-                          num_layers=2, num_classes=3)
-    model_path = 'models/checkpoints/lstm_best.pt'
-    if os.path.exists(model_path):
-        model = load_checkpoint(model, model_path, device)
-    else:
-        logger.warning("LSTM checkpoint not found, using untrained model")
-        model = model.to(device)
-        model.eval()
-
-    # Run predictions
-    logger.info("Running predictions on test set...")
-    x_tensor = torch.tensor(X_test, dtype=torch.float32).to(device)
-    with torch.no_grad():
-        logits = model(x_tensor)
-        probs = torch.softmax(logits, dim=-1).cpu().numpy()
-
-    if ids_test is not None and len(ids_test) == len(X_test):
-        gps_values = gps_lookup.reindex(ids_test)[['lat', 'lon']].to_numpy()
-    else:
-        gps_values = gps_lookup.iloc[:len(X_test)].to_numpy()
-
-    predictions = []
-    for i in range(len(X_test)):
-        label = int(np.argmax(probs[i]))
-        confidence = float(probs[i][label])
-        lat, lon = gps_values[i]
-
-        if np.isnan(lat) or np.isnan(lon):
-            lat = 12.97 + np.random.uniform(-0.5, 0.5)
-            lon = 77.59 + np.random.uniform(-0.5, 0.5)
-
-        predictions.append({
-            'lat': lat, 'lon': lon,
-            'predicted_label': label,
-            'confidence': confidence,
-            'sample_id': i
-        })
-
-    pred_df = pd.DataFrame(predictions)
-
-    # Save predictions for dashboard
-    os.makedirs('data/processed', exist_ok=True)
-    pred_df.to_csv('data/processed/predictions.csv', index=False)
-
-    # Build GeoDataFrame
-    gdf = build_geodataframe(pred_df)
-
-    # Generate heatmap
-    generate_risk_heatmap(gdf, 'reports/disease_risk_map.html')
-
-    # Zone aggregation
-    zone_gdf = aggregate_zone_risk(gdf, grid_size=0.05)
-    if len(zone_gdf) > 0:
-        export_geojson(zone_gdf, 'reports/zone_risk_scores.geojson')
-        generate_zone_map(zone_gdf, 'reports/zone_risk_map.html')
-
-    # Print summary
-    summary = get_risk_summary(gdf)
-    logger.info(f"Risk Summary:")
-    for key, val in summary.items():
-        logger.info(f"  {key}: {val}")
+        plot_confusion_matrix(res['confusion_matrix'], name,
+                              f'{REPORTS_DIR}/{model_type}_confusion_matrix.png')
+        plot_roc_curves(data['y_test'], res['probabilities'], name,
+                        f'{REPORTS_DIR}/{model_type}_roc_curves.png')
+        plot_training_curves(f'{REPORTS_DIR}/{model_type}_training_log.csv',
+                             f'{REPORTS_DIR}/{model_type}_training_curves.png', model_name=name)
+    return results
 
 
-def phase5_dashboard_prep(args) -> None:
-    """Phase 5: Prepare dashboard infrastructure."""
-    if args.skip_mqtt:
-        logger.info("Skipping MQTT setup")
+def phase4_quantum_selection(args, data: dict) -> tuple[dict | None, dict | None]:
+    """QUBO feature selection; returns (results, test metrics of the QUBO-subset RF)."""
+    if args.skip_quantum:
+        logger.info("Skipping Phase 4 (quantum-inspired feature selection)")
+        return None, None
+    banner("PHASE 4: Quantum-Inspired Feature Selection")
+    from src.models.classical_models import evaluate_model, load_model
+    from src.quantum.integration import run_quantum_feature_selection
+
+    rf = load_model(os.path.join(CHECKPOINT_DIR, 'rf_model.joblib'))
+    results = run_quantum_feature_selection(
+        rf_model=rf,
+        X_train_agg=data['X_train_agg'], y_train_agg=data['y_train_agg'],
+        X_test_agg=data['X_test_agg'], y_test_agg=data['y_test_agg'],
+        feature_names=data['agg_feature_names'], max_features=args.max_features,
+        use_qaoa=args.use_qaoa, reports_dir=REPORTS_DIR, model_dir=CHECKPOINT_DIR,
+        seed=args.seed
+    )
+    rf_qubo = load_model(results['rf_qubo_model_path'])
+    idx = results['selected_indices']
+    metrics = evaluate_model(rf_qubo, data['X_test_agg'][:, idx], data['y_test_agg'],
+                             model_name=f'RF (QUBO {len(idx)} features)')
+    return results, metrics
+
+
+def select_best_checkpoint(model_types) -> str:
+    """Pick the trained sequence model with the best validation macro-F1."""
+    from src.inference.predictor import load_checkpoint_dict
+
+    candidates = {}
+    for model_type in model_types:
+        path = os.path.join(CHECKPOINT_DIR, f'{model_type}_best.pt')
+        if os.path.exists(path):
+            candidates[path] = load_checkpoint_dict(path).get('val_macro_f1', -1.0)
+    if not candidates:
+        raise FileNotFoundError(
+            f"No trained sequence model in {CHECKPOINT_DIR}; refusing to build risk maps "
+            "from an untrained model. Run the training phases first."
+        )
+    best = max(candidates, key=candidates.get)
+    logger.info("Using %s for risk mapping (val macro-F1 %.4f)", best, candidates[best])
+    return best
+
+
+def phase5_geospatial_mapping(args, data: dict) -> None:
+    """Risk maps for every sample, labelled with its real id and split."""
+    if args.skip_geo:
+        logger.info("Skipping Phase 5 (geo-spatial mapping)")
         return
+    banner("PHASE 5: Geo-Spatial Risk Mapping")
+    from src.geospatial.heatmap import generate_risk_heatmap, generate_zone_map
+    from src.geospatial.risk_mapper import (
+        aggregate_zone_risk,
+        build_geodataframe,
+        export_geojson,
+        get_risk_summary,
+    )
+    from src.inference.predictor import Predictor
 
-    logger.info("=" * 60)
-    logger.info("PHASE 5: Dashboard Preparation")
-    logger.info("=" * 60)
+    predictor = Predictor(select_best_checkpoint(args.models))
+    meta = data['sample_meta'].set_index('sample_id')
 
-    # Verify InfluxDB connection
+    frames = []
+    for split in ('train', 'val', 'test'):
+        probs = predictor.predict_proba_scaled(data[f'X_{split}'])
+        ids = data[f'ids_{split}']
+        frame = pd.DataFrame(probs, columns=[f'prob_class_{i}' for i in range(probs.shape[1])])
+        frame.insert(0, 'sample_id', ids)
+        frame.insert(1, 'split', split)
+        frame['true_label'] = data[f'y_{split}']
+        frame['predicted_label'] = probs.argmax(axis=1)
+        frame['confidence'] = probs.max(axis=1)
+        frame['lat'] = meta.loc[ids, 'lat'].to_numpy()
+        frame['lon'] = meta.loc[ids, 'lon'].to_numpy()
+        frames.append(frame)
+    pred_df = pd.concat(frames, ignore_index=True)
+    pred_df['model'] = predictor.model_type
+    pred_df.to_csv(os.path.join(PROCESSED_DIR, 'predictions.csv'), index=False)
+
+    gdf = build_geodataframe(pred_df)
+    generate_risk_heatmap(gdf, f'{REPORTS_DIR}/disease_risk_map.html',
+                          title=f'Crop Disease Risk Map ({predictor.model_type}, all splits)')
+    zone_gdf = aggregate_zone_risk(gdf, grid_size_m=args.grid_size_m)
+    if len(zone_gdf) > 0:
+        export_geojson(zone_gdf, f'{REPORTS_DIR}/zone_risk_scores.geojson')
+        generate_zone_map(zone_gdf, f'{REPORTS_DIR}/zone_risk_map.html')
+
+    for key, val in get_risk_summary(gdf).items():
+        logger.info("  %s: %s", key, val)
+
+
+def phase6_dashboard_check(args) -> None:
+    """Verify InfluxDB is reachable for the live dashboard."""
+    if args.skip_mqtt:
+        logger.info("Skipping Phase 6 (dashboard infrastructure check)")
+        return
+    banner("PHASE 6: Dashboard Infrastructure Check")
     try:
         from src.dashboard.influxdb_setup import setup_influxdb
-        success = setup_influxdb('config/influxdb.ini')
-        if not success:
-            logger.warning("InfluxDB setup failed. Run 'docker compose up -d' first.")
-    except Exception as e:
-        logger.warning(f"InfluxDB setup skipped: {e}")
+        if not setup_influxdb():
+            logger.warning("InfluxDB check failed. Start it with: docker compose up -d")
+    except Exception:
+        logger.exception("InfluxDB check could not run")
 
-    logger.info("\nTo start the full dashboard stack:")
+    logger.info("To start the live stack:")
     logger.info("  1. docker compose up -d")
-    logger.info("  2. python -m src.dashboard.mqtt_subscriber --model-path models/checkpoints/lstm_best.pt")
+    logger.info("  2. python -m src.dashboard.mqtt_subscriber --model-path %s/lstm_best.pt",
+                CHECKPOINT_DIR)
     logger.info("  3. python -m src.data.mqtt_publisher --profile mixed")
-    logger.info("  4. Open Grafana: http://localhost:3000 (admin / cropdetection)")
-    logger.info("  5. uvicorn src.api.main:app --reload --port 8000")
+    logger.info("  4. uvicorn src.api.main:app --port 8000")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Quantum-Enhanced Crop Disease Detection Pipeline'
-    )
-    parser.add_argument('--samples', type=int, default=500,
-                        help='Number of synthetic samples (default: 500)')
-    parser.add_argument('--seq-len', type=int, default=30,
-                        help='Sequence length (default: 30)')
-    parser.add_argument('--epochs', type=int, default=50,
-                        help='Training epochs (default: 50)')
-    parser.add_argument('--batch-size', type=int, default=32,
-                        help='Batch size (default: 32)')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed (default: 42)')
-    parser.add_argument('--skip-quantum', action='store_true',
-                        help='Skip quantum feature selection phase')
-    parser.add_argument('--skip-mqtt', action='store_true',
-                        help='Skip MQTT/InfluxDB setup')
-    parser.add_argument('--skip-geo', action='store_true',
-                        help='Skip geo-spatial mapping phase')
-    args = parser.parse_args()
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description='Crop Disease Detection Pipeline')
+    parser.add_argument('--samples', type=int, default=1500)
+    parser.add_argument('--seq-len', type=int, default=30)
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--batch-size', type=int, default=32)
+    parser.add_argument('--lr', type=float, default=0.001)
+    parser.add_argument('--weight-decay', type=float, default=1e-4)
+    parser.add_argument('--hidden-dim', type=int, default=128)
+    parser.add_argument('--dropout', type=float, default=0.3)
+    parser.add_argument('--patience', type=int, default=10)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--models', nargs='+', default=list(DL_MODELS), choices=DL_MODELS)
+    parser.add_argument('--max-features', type=int, default=8,
+                        help='K for QUBO feature selection')
+    parser.add_argument('--use-qaoa', action='store_true',
+                        help='Also run QAOA on a pre-filtered QUBO sub-problem')
+    parser.add_argument('--grid-size-m', type=float, default=5000.0,
+                        help='Zone grid cell size in metres')
+    parser.add_argument('--skip-quantum', action='store_true')
+    parser.add_argument('--skip-geo', action='store_true')
+    parser.add_argument('--skip-mqtt', action='store_true')
+    return parser.parse_args(argv)
 
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    from src.evaluation.evaluate import compare_models
+
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     start = time.time()
-    logger.info("🌱 Quantum-Enhanced Crop Disease Detection Pipeline")
-    logger.info(f"   Samples: {args.samples} | Seq Length: {args.seq_len} | "
-                f"Epochs: {args.epochs}")
+    logger.info("Crop Disease Detection Pipeline | samples=%d seq_len=%d epochs=%d seed=%d",
+                args.samples, args.seq_len, args.epochs, args.seed)
 
-    # Phase 1
-    splits = phase1_data_foundation(args)
+    data = phase1_data_foundation(args)
+    results = phase2_classical_models(args, data)
+    results += phase3_deep_models(args, data)
+    quantum_results, qubo_metrics = phase4_quantum_selection(args, data)
+    if qubo_metrics:
+        results.append(qubo_metrics)
+    compare_models(results, data['y_test'],
+                   output_csv=f'{REPORTS_DIR}/model_comparison.csv',
+                   output_plot=f'{REPORTS_DIR}/model_comparison.png',
+                   output_significance=f'{REPORTS_DIR}/model_significance.csv')
+    phase5_geospatial_mapping(args, data)
+    phase6_dashboard_check(args)
 
-    # Phase 2
-    all_results = phase2_model_training(args, splits)
-
-    # Phase 3
-    quantum_results = phase3_quantum_optimization(args)
-
-    # Phase 4
-    if not args.skip_geo:
-        phase4_geospatial_mapping(args)
-    else:
-        logger.info("Skipping Phase 4 (geo-spatial mapping)")
-
-    # Phase 5
-    phase5_dashboard_prep(args)
-
-    # Summary
-    elapsed = time.time() - start
-    logger.info("=" * 60)
-    logger.info(f"🎉 Pipeline complete! Total time: {elapsed:.1f}s")
-    logger.info("=" * 60)
-    logger.info("\nGenerated artifacts:")
-    logger.info("  data/raw/spectral_dataset.csv")
-    logger.info("  data/processed/*.npy")
-    logger.info("  models/checkpoints/*.pt, *.joblib")
-    logger.info("  reports/model_comparison.csv")
-    logger.info("  reports/disease_risk_map.html")
-    logger.info("  reports/zone_risk_scores.geojson")
-    if quantum_results:
-        logger.info("  reports/qubo_feature_selection_results.csv")
+    banner(f"Pipeline complete in {time.time() - start:.1f}s")
+    logger.info("Artifacts: %s, %s/*.npy, %s/, %s/", RAW_CSV, PROCESSED_DIR,
+                CHECKPOINT_DIR, REPORTS_DIR)
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
