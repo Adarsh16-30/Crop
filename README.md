@@ -13,8 +13,10 @@ geo-spatial risk maps and a live MQTT → InfluxDB → Grafana dashboard.
 >   has been validated on field data.
 > - **"Quantum" means quantum-inspired.** Feature selection is a QUBO solved
 >   by classical simulated annealing on a CPU. QAOA (`--use-qaoa`) runs on a
->   statevector simulator for a small, pre-filtered sub-problem. No quantum
->   hardware is used.
+>   statevector simulator for the top-8-feature sub-problem only (about 2.5
+>   minutes; its runtime grows about 5× per 2 extra variables). Its answer is
+>   checked against the exact brute-force optimum, and the result is reported
+>   in `qubo_comparison.json`. No quantum hardware is used.
 > - **The disease labels have no spatial structure.** The generator draws
 >   labels independently of location, so the risk maps show the method, not
 >   real hotspots.

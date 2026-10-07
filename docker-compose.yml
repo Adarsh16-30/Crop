@@ -73,14 +73,19 @@ services:
     environment:
       MQTT_USERNAME: ${MQTT_USERNAME:?set in .env}
       MQTT_PASSWORD: ${MQTT_PASSWORD:?set in .env}
-    # Build the hashed password file from the env credentials, then start.
+    # Build the hashed password file from the env credentials and copy the
+    # ACL next to it, owned by the mosquitto user with 0700 (the broker
+    # drops root before reading them, and bind mounts from Windows are
+    # world-readable), then start.
     command: >
       sh -c 'mosquitto_passwd -c -b /mosquitto/data/passwd "$$MQTT_USERNAME" "$$MQTT_PASSWORD"
-      && chmod 0700 /mosquitto/data/passwd
+      && cp /mosquitto/config/acl.src /mosquitto/data/acl
+      && chown mosquitto:mosquitto /mosquitto/data/passwd /mosquitto/data/acl
+      && chmod 0700 /mosquitto/data/passwd /mosquitto/data/acl
       && exec mosquitto -c /mosquitto/config/mosquitto.conf'
     volumes:
       - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - ./config/mosquitto.acl:/mosquitto/config/acl:ro
+      - ./config/mosquitto.acl:/mosquitto/config/acl.src:ro
       - mosquitto_data:/mosquitto/data
     restart: unless-stopped
 

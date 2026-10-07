@@ -132,6 +132,9 @@ class SpectralPublisher:
                                   keepalive=self.cfg['keepalive'])
         self.client.loop_start()
         self.running = True
+        deadline = time.monotonic() + 30
+        while self.running and not self.client.is_connected() and time.monotonic() < deadline:
+            time.sleep(0.1)  # don't start publishing before the broker accepts us
         logger.info("Publishing to '%s' every %.2fs (profile=%s, stations=%d, cycle=%d)",
                     self.topic, self.interval, self.profile, len(self.stations),
                     self.cycle_length)

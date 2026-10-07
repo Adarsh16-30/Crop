@@ -27,7 +27,12 @@ from src.models.classical_models import (
     save_model,
     train_random_forest,
 )
-from src.quantum.annealing_optimizer import get_solver_info, run_qaoa, run_simulated_annealing
+from src.quantum.annealing_optimizer import (
+    get_solver_info,
+    numpy_fallback,
+    run_qaoa,
+    run_simulated_annealing,
+)
 from src.quantum.qubo_feature_selector import (
     QISKIT_AVAILABLE,
     build_qubo_matrix,
@@ -39,7 +44,10 @@ from src.quantum.qubo_feature_selector import (
 
 logger = logging.getLogger(__name__)
 
-QAOA_MAX_CANDIDATES = 12
+# QAOA runtime on a statevector simulator grows ~5x per 2 extra variables
+# (measured: 4 vars 8s, 6 vars 30s, 8 vars 155s), so the QAOA sub-problem
+# is limited to the top 8 features by relevance.
+QAOA_MAX_CANDIDATES = 8
 
 
 def select_top_k(relevance: np.ndarray, k: int) -> list[int]:
@@ -112,19 +120,29 @@ def run_quantum_feature_selection(
 
     # Optional QAOA on the most relevant candidates only (statevector cost is 2^n).
     selected_qaoa = None
+    qaoa_exact = None
     if use_qaoa:
         if not QISKIT_AVAILABLE:
             logger.warning("--use-qaoa requested but Qiskit is not installed; skipping")
         else:
             candidates = select_top_k(relevance, min(QAOA_MAX_CANDIDATES, n_features))
-            k = min(max_features, len(candidates) - 1)
-            qp = build_qubo_problem(corr[np.ix_(candidates, candidates)], relevance[candidates],
-                                    len(candidates), max_features=k,
-                                    lambda_penalty=lambda_penalty,
+            k = min(max_features, len(candidates) // 2)
+            sub_corr = corr[np.ix_(candidates, candidates)]
+            qp = build_qubo_problem(sub_corr, relevance[candidates], len(candidates),
+                                    max_features=k, lambda_penalty=lambda_penalty,
                                     correlation_threshold=correlation_threshold)
             try:
                 local = run_qaoa(qp, reps=2, max_vars=QAOA_MAX_CANDIDATES, seed=seed)
                 selected_qaoa = sorted(candidates[i] for i in local)
+                # Ground truth for the same sub-problem: exact brute force.
+                exact_local = numpy_fallback(build_qubo_matrix(
+                    sub_corr, relevance[candidates], len(candidates),
+                    lambda_penalty=lambda_penalty,
+                    correlation_threshold=correlation_threshold, max_features=k))
+                qaoa_exact = sorted(candidates[i] for i in exact_local)
+                logger.info("QAOA on top-%d sub-problem (K=%d): %s | exact optimum: %s | "
+                            "match: %s", len(candidates), k, selected_qaoa, qaoa_exact,
+                            selected_qaoa == qaoa_exact)
             except Exception:
                 logger.exception("QAOA failed; continuing with simulated annealing result")
 
@@ -175,6 +193,8 @@ def run_quantum_feature_selection(
     if selected_qaoa:
         results['qaoa_selected_indices'] = [int(i) for i in selected_qaoa]
         results['qaoa_selected_names'] = [feature_names[i] for i in selected_qaoa]
+        results['qaoa_subproblem_exact_indices'] = [int(i) for i in qaoa_exact]
+        results['qaoa_matches_exact_optimum'] = selected_qaoa == qaoa_exact
 
     with open(os.path.join(reports_dir, 'qubo_comparison.json'), 'w') as f:
         json.dump(results, f, indent=2, default=float)
