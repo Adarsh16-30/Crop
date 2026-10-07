@@ -18,7 +18,7 @@ from src.inference.predictor import Predictor
 
 from .conftest import SEQ_LEN
 
-MQTT_CFG = {'host': 'localhost', 'port': 1883, 'topic': 'crop/spectral', 'client_id': 'test',
+MQTT_CFG = {'host': 'localhost', 'port': 8883, 'topic': 'crop/spectral', 'client_id': 'test',
             'keepalive': 60, 'qos': 1, 'username': None, 'password': None, 'tls_ca_file': None}
 
 
@@ -156,3 +156,48 @@ class TestConfig:
         monkeypatch.setenv('INFLUX_WRITE_TOKEN', 'writer')
         assert load_influx_config(str(tmp_path / 'none.ini'),
                                   token_env='INFLUX_WRITE_TOKEN')['token'] == 'writer'
+
+
+class TestMqttTls:
+
+    @pytest.fixture(scope='class')
+    def ca_file(self, tmp_path_factory):
+        import os
+        import shutil
+        import subprocess
+        if not shutil.which('openssl'):
+            pytest.skip('openssl CLI not available')
+        out = tmp_path_factory.mktemp('ca')
+        key, crt = out / 'ca.key', out / 'ca.crt'
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'ec', '-pkeyopt',
+                        'ec_paramgen_curve:prime256v1', '-nodes', '-keyout', str(key),
+                        '-out', str(crt), '-days', '1', '-subj', '/CN=Test CA'],
+                       check=True, capture_output=True,
+                       env={**os.environ, 'MSYS_NO_PATHCONV': '1'})
+        return str(crt)
+
+    def test_context_verifies_cert_and_hostname_tls12_plus(self, ca_file):
+        import ssl
+
+        from src.config import make_tls_context
+        ctx = make_tls_context(ca_file)
+        assert ctx.verify_mode == ssl.CERT_REQUIRED
+        assert ctx.check_hostname is True
+        assert ctx.minimum_version >= ssl.TLSVersion.TLSv1_2
+
+    def test_client_uses_tls_when_ca_configured(self, ca_file):
+        from src.config import make_mqtt_client
+        client = make_mqtt_client({**MQTT_CFG, 'tls_ca_file': ca_file}, client_id='t')
+        assert client._ssl_context is not None and client._ssl
+
+    def test_missing_ca_is_a_clear_error(self):
+        from src.config import make_mqtt_client
+        with pytest.raises(FileNotFoundError, match='gen_mqtt_certs.sh'):
+            make_mqtt_client({**MQTT_CFG, 'tls_ca_file': 'nope/ca.crt'}, client_id='t')
+
+    def test_default_config_is_tls(self, monkeypatch):
+        for var in ('MQTT_PORT', 'MQTT_TLS_CA_FILE'):
+            monkeypatch.delenv(var, raising=False)
+        cfg = load_mqtt_config('config/mqtt.ini')
+        assert cfg['port'] == 8883
+        assert cfg['tls_ca_file'] == 'certs/mqtt/ca.crt'

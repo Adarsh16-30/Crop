@@ -33,3 +33,6 @@ reports/*
 Thumbs.db
 .vscode/
 .idea/
+
+# TLS keys and certificates (scripts/gen_mqtt_certs.sh)
+certs/

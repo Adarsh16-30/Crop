@@ -10,9 +10,12 @@ x-app: &app
   env_file: .env
   environment:
     MQTT_HOST: mosquitto
+    MQTT_PORT: "8883"
+    MQTT_TLS_CA_FILE: /app/certs/ca.crt
     INFLUX_URL: http://influxdb:8086
   volumes:
     - ./models/checkpoints:/app/models/checkpoints:ro
+    - ./certs/mqtt/ca.crt:/app/certs/ca.crt:ro
   restart: unless-stopped
   profiles: ["app"]
 
@@ -69,23 +72,29 @@ services:
     image: eclipse-mosquitto:2.0.20
     container_name: crop-mosquitto
     ports:
-      - "127.0.0.1:1883:1883"
+      - "127.0.0.1:8883:8883"
     environment:
       MQTT_USERNAME: ${MQTT_USERNAME:?set in .env}
       MQTT_PASSWORD: ${MQTT_PASSWORD:?set in .env}
-    # Build the hashed password file from the env credentials and copy the
-    # ACL next to it, owned by the mosquitto user with 0700 (the broker
-    # drops root before reading them, and bind mounts from Windows are
-    # world-readable), then start.
+    # Before starting: build the hashed password file from the env
+    # credentials, and copy the ACL and TLS material into the data volume,
+    # owned by the mosquitto user with 0700 (the broker drops root before
+    # reading them, and bind mounts from Windows are world-readable).
     command: >
-      sh -c 'mosquitto_passwd -c -b /mosquitto/data/passwd "$$MQTT_USERNAME" "$$MQTT_PASSWORD"
+      sh -c '[ -f /mosquitto/certs.src/server.crt ] && [ -f /mosquitto/certs.src/server.key ]
+      || { echo "Missing MQTT TLS certificates: run scripts/gen_mqtt_certs.sh" >&2; exit 1; }
+      && mosquitto_passwd -c -b /mosquitto/data/passwd "$$MQTT_USERNAME" "$$MQTT_PASSWORD"
       && cp /mosquitto/config/acl.src /mosquitto/data/acl
-      && chown mosquitto:mosquitto /mosquitto/data/passwd /mosquitto/data/acl
-      && chmod 0700 /mosquitto/data/passwd /mosquitto/data/acl
+      && mkdir -p /mosquitto/data/certs
+      && cp /mosquitto/certs.src/ca.crt /mosquitto/certs.src/server.crt /mosquitto/certs.src/server.key /mosquitto/data/certs/
+      && chown -R mosquitto:mosquitto /mosquitto/data/passwd /mosquitto/data/acl /mosquitto/data/certs
+      && chmod 0700 /mosquitto/data/passwd /mosquitto/data/acl /mosquitto/data/certs
+      && chmod 0600 /mosquitto/data/certs/server.key
       && exec mosquitto -c /mosquitto/config/mosquitto.conf'
     volumes:
       - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./config/mosquitto.acl:/mosquitto/config/acl.src:ro
+      - ./certs/mqtt:/mosquitto/certs.src:ro
       - mosquitto_data:/mosquitto/data
     restart: unless-stopped
 

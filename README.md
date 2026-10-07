@@ -79,6 +79,7 @@ The main flags are `--models lstm cnn_lstm`, `--max-features 8`,
 
 ```bash
 cp .env.example .env              # then replace every "change-me" value
+bash scripts/gen_mqtt_certs.sh    # local CA + broker TLS certificate (certs/mqtt/)
 docker compose up -d              # InfluxDB, Grafana, Mosquitto (bound to 127.0.0.1)
 python -m src.dashboard.influxdb_setup --create-tokens   # paste tokens into .env
 docker compose --profile app up -d                      # API, bridge, simulator
@@ -101,7 +102,14 @@ intervals the first predictions appear after about 2.5 minutes.
 Security defaults:
 
 - Every credential is read from `.env`, never from the repo.
-- MQTT requires a username and password, with ACLs limiting access to `crop/#`.
+- MQTT is TLS-only: the broker listens on port 8883 with no plaintext
+  listener, and requires TLS 1.2 or newer (TLS 1.3 is negotiated in practice).
+  Clients trust only `certs/mqtt/ca.crt` and verify the broker's hostname.
+  The certificate covers `mosquitto`, `localhost` and `127.0.0.1`; add more
+  names with `MQTT_CERT_HOSTS="host1,10.0.0.5" bash scripts/gen_mqtt_certs.sh --force`.
+  Keep `certs/mqtt/ca.key` private. The `certs/` folder is excluded from git
+  and from the Docker image.
+- MQTT also requires a username and password, with ACLs limiting access to `crop/#`.
 - The bridge writes with a write-only InfluxDB token, and Grafana reads with a read-only one.
 - The API requires `X-API-Key`. For local development only, set `API_ALLOW_UNAUTHENTICATED=true`.
 
@@ -205,6 +213,7 @@ probabilities as the offline preprocessed path.
 
 ```
 config/            non-secret INI settings, Mosquitto config + ACL
+scripts/           gen_mqtt_certs.sh (MQTT TLS certificates)
 src/
   constants.py     bands, labels, risk weights (single source of truth)
   config.py        INI + env loading, MQTT client factory
