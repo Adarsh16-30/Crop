@@ -93,11 +93,55 @@ python -m src.data.mqtt_publisher --profile mixed --interval 1
 uvicorn src.api.main:app --port 8000
 ```
 
-Grafana is at http://localhost:3000. It has a station filter, the
-prediction panels, a bridge-health panel and a high-risk alert rule. Each
-simulated station publishes one complete 30-reading crop cycle at a time.
-The bridge predicts once per completed cycle, so with 5 stations at 1 s
-intervals the first predictions appear after about 2.5 minutes.
+Grafana runs at http://localhost:3000. Four linked dashboards are provisioned
+in the **Crop Disease** folder:
+
+| Dashboard | Shows |
+|---|---|
+| **Field Overview** | KPIs (stations, readings, predictions, mean risk, high-risk stations, live agreement with ground truth), a station map colored by latest risk, the latest prediction per station, risk over time, a class timeline per station, the prediction mix, class probabilities and active alerts |
+| **Spectral Analysis** | Band reflectance per station (one panel per station), six vegetation indices over time, an NDVI heatmap, NDVI distribution by true profile, and the latest indices per station |
+| **Model Performance** | Live: rolling agreement with ground truth, live confusion matrix, confidence distribution and out-of-distribution count. Offline, per pipeline run: model metrics with 95% CIs, McNemar tests, training curves by epoch, random vs spatial CV, QUBO vs baseline feature selection, the batch risk map, and macro-F1 across runs |
+| **System Health** | Data freshness, ingest rate, station heartbeat, data by source, bridge throughput and error counters, and per-station freshness |
+
+Every live panel can be filtered by **Station** and **Source**. Source is
+`simulator` for the live MQTT stream and `backfill` for generated history.
+Three alert rules are provisioned:
+
+- High risk at a station: latest risk above 0.7.
+- No sensor readings for 5 minutes.
+- Bridge dropping payloads or failing writes.
+
+Point them at your own contact point (email, Slack and so on) in
+Grafana → Alerting. Out of the box Grafana tries email, which needs SMTP.
+
+Where the data comes from:
+
+```bash
+# Live: the bridge writes spectral_readings, disease_predictions and bridge_stats
+# History: 12 h of past readings through the same bridge code path (source=backfill)
+python -m src.dashboard.seed_history --model-path models/checkpoints/cnn_lstm_best.pt --hours 12
+python -m src.dashboard.seed_history --clear        # remove it again (uses INFLUX_TOKEN)
+# Offline results: run_pipeline.py publishes these automatically when InfluxDB is
+# reachable; to publish an existing run by hand:
+python -m src.dashboard.publish_pipeline_metrics
+```
+
+The dashboards are generated from `src/dashboard/grafana/build_dashboards.py`.
+Edit that file, not the JSON:
+
+```bash
+python -m src.dashboard.grafana.build_dashboards
+```
+
+After regenerating, restart Grafana (`docker compose restart grafana`) if the
+change doesn't show up. Grafana polls the files every 30 seconds, but on
+Docker Desktop for Windows file changes in bind mounts are not always
+detected.
+
+Each simulated station publishes one complete 30-reading crop cycle at a
+time. The bridge predicts once per completed cycle, so with 5 stations at 1 s
+intervals the first live predictions appear after about 2.5 minutes. Run the
+backfill to have history immediately.
 
 Security defaults:
 
@@ -226,7 +270,8 @@ src/
   quantum/         QUBO formulation, solvers, baseline comparison
   geospatial/      risk GeoDataFrames, metric zone grid, Folium maps
   api/             FastAPI service
-  dashboard/       MQTT→InfluxDB bridge, InfluxDB setup, Grafana provisioning
+  dashboard/       MQTT→InfluxDB bridge, InfluxDB setup, history backfill,
+                   pipeline-metrics export, Grafana dashboards-as-code + provisioning
 run_pipeline.py    end-to-end runner
 tests/             pytest suite
 ```

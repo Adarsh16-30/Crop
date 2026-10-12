@@ -30,6 +30,8 @@ groups:
                   |> filter(fn: (r) => r["_measurement"] == "disease_predictions")
                   |> filter(fn: (r) => r["_field"] == "risk_score")
                   |> group(columns: ["station_id"])
+                  |> last()
+                  |> keep(columns: ["_time", "_value", "station_id"])
           - refId: B
             datasourceUid: __expr__
             model:
@@ -47,3 +49,91 @@ groups:
                 - evaluator:
                     type: gt
                     params: [0.7]
+
+      - uid: crop-no-data
+        title: No sensor readings for 5 minutes
+        condition: C
+        for: 2m
+        noDataState: Alerting
+        execErrState: Error
+        annotations:
+          summary: "No spectral readings reached InfluxDB in the last 5 minutes (publisher, broker or bridge down?)"
+        labels:
+          severity: critical
+        data:
+          - refId: A
+            datasourceUid: influxdb-crop
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              refId: A
+              query: |
+                from(bucket: "crop_data")
+                  |> range(start: -5m)
+                  |> filter(fn: (r) => r["_measurement"] == "spectral_readings")
+                  |> filter(fn: (r) => r["_field"] == "nir_842")
+                  |> group()
+                  |> count()
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+
+      - uid: crop-bridge-errors
+        title: Bridge dropping payloads or failing writes
+        condition: C
+        for: 0m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: "Bridge reported {{ $values.B }} new invalid payloads / write errors in 10 minutes"
+        labels:
+          severity: warning
+        data:
+          - refId: A
+            datasourceUid: influxdb-crop
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              query: |
+                from(bucket: "crop_data")
+                  |> range(start: -10m)
+                  |> filter(fn: (r) => r["_measurement"] == "bridge_stats")
+                  |> filter(fn: (r) => r["_field"] == "invalid" or r["_field"] == "write_errors")
+                  |> difference(nonNegative: true)
+                  |> sum()
+                  |> group()
+                  |> sum()
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]

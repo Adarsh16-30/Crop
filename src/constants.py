@@ -17,6 +17,9 @@ BANDS = [
 INDICES = ['NDRE', 'NDVI', 'MSI', 'SWIR_ratio', 'REIP_approx', 'CRI']
 
 LABEL_NAMES = {0: 'Healthy', 1: 'Early Stress', 2: 'Active Disease'}
+
+# Simulator profile name -> class label (ground truth for simulated streams).
+PROFILE_LABELS = {'healthy': 0, 'early_stress': 1, 'active_disease': 2}
 NUM_CLASSES = len(LABEL_NAMES)
 
 # Per-class risk weight. A prediction's risk is the probability-weighted

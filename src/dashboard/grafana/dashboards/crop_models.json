@@ -1,0 +1,1803 @@
+{
+  "uid": "crop-models",
+  "title": "Crop Disease — Model Performance",
+  "description": "Live model behaviour (accuracy against simulator ground truth, confidence, out-of-distribution rate) and the offline evaluation published by run_pipeline.py. All offline numbers are on SYNTHETIC data.",
+  "tags": [
+    "crop"
+  ],
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "timezone": "browser",
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "fiscalYearStartMonth": 0,
+  "liveNow": false,
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "crop"
+      ],
+      "asDropdown": false,
+      "includeVars": true,
+      "keepTime": true,
+      "title": "Crop dashboards"
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "bucket",
+        "type": "constant",
+        "query": "crop_data",
+        "hide": 2,
+        "skipUrlSync": true,
+        "current": {
+          "text": "crop_data",
+          "value": "crop_data"
+        },
+        "options": [
+          {
+            "text": "crop_data",
+            "value": "crop_data",
+            "selected": true
+          }
+        ]
+      },
+      {
+        "name": "station",
+        "label": "Station",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb-crop"
+        },
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"${bucket}\", tag: \"station_id\", predicate: (r) => r._measurement == \"spectral_readings\", start: -30d)",
+        "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"${bucket}\", tag: \"station_id\", predicate: (r) => r._measurement == \"spectral_readings\", start: -30d)",
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0,
+        "options": [],
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "source",
+        "label": "Source",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb-crop"
+        },
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"${bucket}\", tag: \"source\", predicate: (r) => r._measurement == \"spectral_readings\", start: -30d)",
+        "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"${bucket}\", tag: \"source\", predicate: (r) => r._measurement == \"spectral_readings\", start: -30d)",
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0,
+        "options": [],
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "run_id",
+        "label": "Pipeline run",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb-crop"
+        },
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"${bucket}\", tag: \"run_id\", predicate: (r) => r._measurement == \"pipeline_run\", start: -3650d)",
+        "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"${bucket}\", tag: \"run_id\", predicate: (r) => r._measurement == \"pipeline_run\", start: -3650d)",
+        "refresh": 2,
+        "sort": 2,
+        "hide": 0,
+        "options": [],
+        "multi": false,
+        "includeAll": false,
+        "current": {}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Live model (selected time range)",
+      "collapsed": false,
+      "panels": [],
+      "id": 1,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Rolling agreement with ground truth (last 20 predictions)",
+      "description": "",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"disease_predictions\")\n  |> filter(fn: (r) => r._field == \"correct\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/ and r.source =~ /^${source:regex}$/)\n  |> group()\n  |> sort(columns: [\"_time\"])\n  |> movingAverage(n: 20)\n  |> keep(columns: [\"_time\", \"_value\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "gradientMode": "opacity",
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": true,
+            "lineInterpolation": "smooth",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "area"
+            },
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "barAlignment": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "green",
+                "value": 0.9
+              }
+            ]
+          },
+          "displayName": "Agreement",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 2,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "table",
+      "title": "Live confusion matrix (rows = true profile)",
+      "description": "Counts of live predictions by simulated truth (row) and model output (column)",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"disease_predictions\")\n  |> filter(fn: (r) => r._field == \"label_name\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/ and r.source =~ /^${source:regex}$/)\n  |> filter(fn: (r) => exists r.true_profile)\n  |> map(fn: (r) => ({r with predicted: r._value}))\n  |> group(columns: [\"true_profile\", \"predicted\"])\n  |> count()\n  |> group()\n  |> pivot(rowKey: [\"true_profile\"], columnKey: [\"predicted\"], valueColumn: \"_value\")"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "true_profile"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "True profile"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "sortBy": []
+      },
+      "id": 3,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "histogram",
+      "title": "Prediction confidence",
+      "description": "",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"disease_predictions\")\n  |> filter(fn: (r) => r._field == \"confidence\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/ and r.source =~ /^${source:regex}$/)\n  |> group()\n  |> keep(columns: [\"_time\", \"_value\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 70,
+            "lineWidth": 1,
+            "gradientMode": "none"
+          },
+          "displayName": "Confidence"
+        },
+        "overrides": []
+      },
+      "options": {
+        "combine": false,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "bucketSize": 0.02
+      },
+      "id": 4,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Mean confidence and risk",
+      "description": "",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"disease_predictions\")\n  |> filter(fn: (r) => r._field == \"confidence\" or r._field == \"risk_score\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/ and r.source =~ /^${source:regex}$/)\n  |> group(columns: [\"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "gradientMode": "opacity",
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": true,
+            "lineInterpolation": "smooth",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "barAlignment": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 5,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 9
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Out-of-distribution predictions",
+      "description": "Inputs with any standardized feature beyond |z| > 8",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"disease_predictions\")\n  |> filter(fn: (r) => r._field == \"out_of_distribution\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/ and r.source =~ /^${source:regex}$/)\n  |> filter(fn: (r) => r._value == true)\n  |> group()\n  |> count()"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "0",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 6,
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 16,
+        "y": 9
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Live predictions with ground truth",
+      "description": "",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"disease_predictions\")\n  |> filter(fn: (r) => r._field == \"correct\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/ and r.source =~ /^${source:regex}$/)\n  |> group()\n  |> count()"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "0",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 7,
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 20,
+        "y": 9
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Offline evaluation — pipeline run $run_id (synthetic test set)",
+      "collapsed": false,
+      "panels": [],
+      "id": 8,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Best model (macro-F1)",
+      "description": "",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -3650d)\n  |> filter(fn: (r) => r._measurement == \"pipeline_run\")\n  |> filter(fn: (r) => r._field == \"best_model\")\n  |> filter(fn: (r) => r.run_id == \"${run_id}\")\n  |> last()"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "run pipeline",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 9,
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Best macro-F1",
+      "description": "",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -3650d)\n  |> filter(fn: (r) => r._measurement == \"pipeline_run\")\n  |> filter(fn: (r) => r._field == \"best_f1_macro\")\n  |> filter(fn: (r) => r.run_id == \"${run_id}\")\n  |> last()"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "run pipeline",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "green",
+                "value": 0.9
+              }
+            ]
+          },
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 10,
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 18
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Test samples",
+      "description": "",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -3650d)\n  |> filter(fn: (r) => r._measurement == \"pipeline_run\")\n  |> filter(fn: (r) => r._field == \"n_test\")\n  |> filter(fn: (r) => r.run_id == \"${run_id}\")\n  |> last()"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "run pipeline",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 11,
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 18
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Samples on risk map",
+      "description": "",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -3650d)\n  |> filter(fn: (r) => r._measurement == \"pipeline_run\")\n  |> filter(fn: (r) => r._field == \"n_samples_mapped\")\n  |> filter(fn: (r) => r.run_id == \"${run_id}\")\n  |> last()"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "run pipeline",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 12,
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 18
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "Test accuracy and macro-F1 by model",
+      "description": "",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -3650d)\n  |> filter(fn: (r) => r._measurement == \"model_evaluation\")\n  |> filter(fn: (r) => r._field == \"accuracy\" or r._field == \"f1_macro\")\n  |> filter(fn: (r) => r.run_id == \"${run_id}\")\n  |> pivot(rowKey: [\"model\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> keep(columns: [\"model\", \"accuracy\", \"f1_macro\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 3,
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "gradientMode": "hue",
+            "axisSoftMin": 0.8,
+            "axisSoftMax": 1
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "accuracy"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Accuracy"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "f1_macro"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Macro-F1"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "xField": "model",
+        "orientation": "auto",
+        "groupWidth": 0.75,
+        "barWidth": 0.9,
+        "showValue": "always",
+        "stacking": "none",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "id": 13,
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "table",
+      "title": "Pairwise McNemar tests",
+      "description": "",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -3650d)\n  |> filter(fn: (r) => r._measurement == \"model_significance\")\n  |> filter(fn: (r) => r._field == \"p_value\" or r._field == \"only_a_correct\" or r._field == \"only_b_correct\" or r._field == \"significant\")\n  |> filter(fn: (r) => r.run_id == \"${run_id}\")\n  |> pivot(rowKey: [\"model_a\", \"model_b\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> keep(columns: [\"model_a\", \"model_b\", \"only_a_correct\", \"only_b_correct\", \"p_value\", \"significant\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model_a"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Model A"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model_b"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Model B"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "only_a_correct"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Only A right"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "only_b_correct"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Only B right"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p_value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "p-value"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "significant"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Significant (p<0.05)"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "true": {
+                        "text": "yes",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "false": {
+                        "text": "no",
+                        "color": "transparent",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "p-value",
+            "desc": false
+          }
+        ]
+      },
+      "id": 14,
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "table",
+      "title": "Model comparison with 95% bootstrap CIs",
+      "description": "",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -3650d)\n  |> filter(fn: (r) => r._measurement == \"model_evaluation\")\n  |> filter(fn: (r) => r._field == \"accuracy\" or r._field == \"accuracy_ci_low\" or r._field == \"accuracy_ci_high\" or r._field == \"f1_macro\" or r._field == \"f1_macro_ci_low\" or r._field == \"f1_macro_ci_high\" or r._field == \"f1_early_stress\")\n  |> filter(fn: (r) => r.run_id == \"${run_id}\")\n  |> pivot(rowKey: [\"model\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> keep(columns: [\"model\", \"accuracy\", \"accuracy_ci_low\", \"accuracy_ci_high\", \"f1_macro\", \"f1_macro_ci_low\", \"f1_macro_ci_high\", \"f1_early_stress\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Model"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "accuracy"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Accuracy"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "accuracy_ci_low"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Acc CI low"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "accuracy_ci_high"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Acc CI high"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "f1_macro"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Macro-F1"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "gradient"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "continuous-RdYlGr"
+                }
+              },
+              {
+                "id": "min",
+                "value": 0.85
+              },
+              {
+                "id": "max",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "f1_macro_ci_low"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "F1 CI low"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "f1_macro_ci_high"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "F1 CI high"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "f1_early_stress"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Early-Stress F1"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "Macro-F1",
+            "desc": true
+          }
+        ]
+      },
+      "id": 15,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "model": 0,
+              "accuracy": 1,
+              "accuracy_ci_low": 2,
+              "accuracy_ci_high": 3,
+              "f1_macro": 4,
+              "f1_macro_ci_low": 5,
+              "f1_macro_ci_high": 6,
+              "f1_early_stress": 7
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "trend",
+      "title": "Training loss by epoch",
+      "description": "Per-epoch training and validation loss of each sequence model",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "data = from(bucket: \"${bucket}\")\n  |> range(start: -3650d)\n  |> filter(fn: (r) => r._measurement == \"training_history\")\n  |> filter(fn: (r) => r._field == \"epoch\" or r._field == \"train_loss\" or r._field == \"val_loss\")\n  |> filter(fn: (r) => r.run_id == \"${run_id}\")\n  |> pivot(rowKey: [\"_time\", \"model\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\ns0 = data |> map(fn: (r) => ({epoch: r.epoch, series: r.model + \" train\", value: r.train_loss}))\ns1 = data |> map(fn: (r) => ({epoch: r.epoch, series: r.model + \" validation\", value: r.val_loss}))\nunion(tables: [s0, s1])\n  |> pivot(rowKey: [\"epoch\"], columnKey: [\"series\"], valueColumn: \"value\")\n  |> sort(columns: [\"epoch\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": true,
+            "lineInterpolation": "smooth",
+            "axisSoftMin": null,
+            "axisSoftMax": null
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "epoch",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "id": 16,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "trend",
+      "title": "Validation macro-F1 by epoch",
+      "description": "Checkpoints are chosen at the epoch with the best validation macro-F1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "data = from(bucket: \"${bucket}\")\n  |> range(start: -3650d)\n  |> filter(fn: (r) => r._measurement == \"training_history\")\n  |> filter(fn: (r) => r._field == \"epoch\" or r._field == \"val_macro_f1\" or r._field == \"train_acc\")\n  |> filter(fn: (r) => r.run_id == \"${run_id}\")\n  |> pivot(rowKey: [\"_time\", \"model\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\ns0 = data |> map(fn: (r) => ({epoch: r.epoch, series: r.model + \" val macro-F1\", value: r.val_macro_f1}))\ns1 = data |> map(fn: (r) => ({epoch: r.epoch, series: r.model + \" train accuracy\", value: r.train_acc}))\nunion(tables: [s0, s1])\n  |> pivot(rowKey: [\"epoch\"], columnKey: [\"series\"], valueColumn: \"value\")\n  |> sort(columns: [\"epoch\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": true,
+            "lineInterpolation": "smooth",
+            "axisSoftMin": null,
+            "axisSoftMax": null
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "epoch",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "id": 17,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "Classical CV: random vs spatial-zone hold-out (macro-F1)",
+      "description": "",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -3650d)\n  |> filter(fn: (r) => r._measurement == \"cross_validation\")\n  |> filter(fn: (r) => r._field == \"cv_f1_macro_mean\")\n  |> filter(fn: (r) => r.run_id == \"${run_id}\")\n  |> pivot(rowKey: [\"model\"], columnKey: [\"cv_split\"], valueColumn: \"_value\")\n  |> group()\n  |> keep(columns: [\"model\", \"random\", \"spatial_zone\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 3,
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "gradientMode": "hue",
+            "axisSoftMin": 0.9,
+            "axisSoftMax": 1
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "random"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Random 5-fold"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "spatial_zone"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Spatial zone hold-out"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "xField": "model",
+        "orientation": "auto",
+        "groupWidth": 0.75,
+        "barWidth": 0.9,
+        "showValue": "always",
+        "stacking": "none",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "id": 18,
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 48
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "Feature selection: QUBO vs baselines (macro-F1)",
+      "description": "",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -3650d)\n  |> filter(fn: (r) => r._measurement == \"feature_selection\")\n  |> filter(fn: (r) => r._field == \"cv_f1_macro_mean\" or r._field == \"test_f1_macro\")\n  |> filter(fn: (r) => r.run_id == \"${run_id}\")\n  |> pivot(rowKey: [\"method\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> keep(columns: [\"method\", \"cv_f1_macro_mean\", \"test_f1_macro\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 3,
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "gradientMode": "hue",
+            "axisSoftMin": 0.8,
+            "axisSoftMax": 1
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cv_f1_macro_mean"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "CV macro-F1"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "test_f1_macro"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Test macro-F1"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "xField": "method",
+        "orientation": "auto",
+        "groupWidth": 0.75,
+        "barWidth": 0.9,
+        "showValue": "always",
+        "stacking": "none",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "id": 19,
+      "gridPos": {
+        "h": 9,
+        "w": 16,
+        "x": 8,
+        "y": 48
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "geomap",
+      "title": "Batch risk map — every sample, best model",
+      "description": "Pipeline predictions for all samples (train/val/test). The generator assigns disease independently of location, so no real hotspots are expected.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -3650d)\n  |> filter(fn: (r) => r._measurement == \"batch_risk\")\n  |> filter(fn: (r) => r._field == \"latitude\" or r._field == \"longitude\" or r._field == \"risk_score\" or r._field == \"predicted_label\" or r._field == \"true_label\" or r._field == \"sample_id\")\n  |> filter(fn: (r) => r.run_id == \"${run_id}\")\n  |> pivot(rowKey: [\"_time\", \"split\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.2
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "red",
+                "value": 0.7
+              }
+            ]
+          },
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "view": {
+          "id": "fit",
+          "lat": 12.97,
+          "lon": 77.59,
+          "zoom": 8,
+          "allLayers": true
+        },
+        "controls": {
+          "showZoom": true,
+          "mouseWheelZoom": true,
+          "showAttribution": true,
+          "showScale": true
+        },
+        "basemap": {
+          "type": "osm-standard",
+          "name": "OpenStreetMap",
+          "config": {}
+        },
+        "layers": [
+          {
+            "type": "markers",
+            "name": "Batch risk map — every sample, best model",
+            "tooltip": true,
+            "config": {
+              "showLegend": true,
+              "style": {
+                "size": {
+                  "fixed": 5,
+                  "min": 4,
+                  "max": 20
+                },
+                "color": {
+                  "field": "risk_score",
+                  "fixed": "dark-green"
+                },
+                "opacity": 0.8,
+                "symbol": {
+                  "mode": "fixed",
+                  "fixed": "img/icons/marker/circle.svg"
+                },
+                "rotation": {
+                  "fixed": 0,
+                  "mode": "mod",
+                  "min": -360,
+                  "max": 360
+                },
+                "symbolAlign": {
+                  "horizontal": "center",
+                  "vertical": "center"
+                },
+                "textConfig": {
+                  "fontSize": 12,
+                  "offsetX": 0,
+                  "offsetY": -16,
+                  "textAlign": "center",
+                  "textBaseline": "middle"
+                }
+              }
+            },
+            "location": {
+              "mode": "coords",
+              "latitude": "latitude",
+              "longitude": "longitude"
+            }
+          }
+        ],
+        "tooltip": {
+          "mode": "details"
+        }
+      },
+      "id": 20,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 57
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Macro-F1 across pipeline runs",
+      "description": "One point per model per pipeline run (last 365 days, independent of the dashboard time range)",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-crop"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -365d)\n  |> filter(fn: (r) => r._measurement == \"model_evaluation\")\n  |> filter(fn: (r) => r._field == \"f1_macro\")\n  |> keep(columns: [\"_time\", \"_value\", \"model\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "gradientMode": "opacity",
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": true,
+            "lineInterpolation": "smooth",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "axisSoftMin": null,
+            "axisSoftMax": null,
+            "barAlignment": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.model}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 21,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 57
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-crop"
+      }
+    }
+  ]
+}

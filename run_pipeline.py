@@ -232,17 +232,23 @@ def phase5_geospatial_mapping(args, data: dict) -> None:
 
 
 def phase6_dashboard_check(args) -> None:
-    """Verify InfluxDB is reachable for the live dashboard."""
+    """Verify InfluxDB and publish this run's results for the Grafana dashboards."""
     if args.skip_mqtt:
         logger.info("Skipping Phase 6 (dashboard infrastructure check)")
         return
-    banner("PHASE 6: Dashboard Infrastructure Check")
+    banner("PHASE 6: Dashboard (InfluxDB check + publish results)")
     try:
+        from src.config import load_influx_config
         from src.dashboard.influxdb_setup import setup_influxdb
+        from src.dashboard.publish_pipeline_metrics import publish
+
         if not setup_influxdb():
             logger.warning("InfluxDB check failed. Start it with: docker compose up -d")
+        else:
+            publish(load_influx_config(token_env='INFLUX_WRITE_TOKEN'),
+                    reports_dir=REPORTS_DIR, processed_dir=PROCESSED_DIR)
     except Exception:
-        logger.exception("InfluxDB check could not run")
+        logger.exception("Publishing results to InfluxDB failed")
 
     logger.info("To start the live stack:")
     logger.info("  1. docker compose up -d")

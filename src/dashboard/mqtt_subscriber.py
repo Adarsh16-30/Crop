@@ -18,12 +18,13 @@ import logging
 import signal
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.config import load_influx_config, load_mqtt_config, make_mqtt_client
-from src.constants import BANDS
+from src.constants import BANDS, PROFILE_LABELS
 from src.features.spectral_indices import compute_index_values
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,17 @@ class SequenceAssembler:
         return np.array([buf[t] for t in range(self.seq_len)], dtype=np.float64)
 
 
+def _stamp(point, reading: SensorReading):
+    """
+    Use the sensor's own timestamp when present, so readings that arrive late
+    (e.g. queued by the broker while the bridge was down) land at the time
+    they were measured, not the time they were ingested.
+    """
+    if reading.timestamp:
+        point = point.time(datetime.fromtimestamp(reading.timestamp, tz=UTC))
+    return point
+
+
 def build_reading_point(reading: SensorReading):
     from influxdb_client import Point
 
@@ -92,6 +104,8 @@ def build_reading_point(reading: SensorReading):
              .tag('source', reading.source)
              .tag('lat', f'{reading.lat:.4f}')
              .tag('lon', f'{reading.lon:.4f}')
+             .field('latitude', float(reading.lat))
+             .field('longitude', float(reading.lon))
              .field('cycle_id', reading.cycle_id)
              .field('timestep', reading.timestep))
     if reading.profile:
@@ -101,7 +115,7 @@ def build_reading_point(reading: SensorReading):
         point = point.field(name, float(value))
     for name, value in compute_index_values(bands).items():
         point = point.field(name, float(value))
-    return point
+    return _stamp(point, reading)
 
 
 def build_prediction_point(reading: SensorReading, prediction: dict):
@@ -118,9 +132,33 @@ def build_prediction_point(reading: SensorReading, prediction: dict):
              .field('confidence', prediction['confidence'])
              .field('risk_score', prediction['risk_score'])
              .field('out_of_distribution', prediction['out_of_distribution']))
+    point = point.field('latitude', float(reading.lat)).field('longitude', float(reading.lon))
     for i, prob in enumerate(prediction['probabilities']):
         point = point.field(f'prob_class_{i}', prob)
-    return point
+    # Simulated streams carry the true profile: record it so the dashboard can
+    # show live agreement between the model and the ground truth.
+    true_label = PROFILE_LABELS.get(reading.profile or '')
+    if true_label is not None:
+        point = (point.tag('true_profile', reading.profile)
+                 .field('true_label', true_label)
+                 .field('correct', int(true_label == prediction['predicted_label'])))
+    return _stamp(point, reading)
+
+
+def reading_to_records(reading: SensorReading, assembler: SequenceAssembler,
+                       predictor=None) -> tuple[list, dict | None]:
+    """
+    The bridge's per-reading logic, shared with the history backfill:
+    one spectral point, plus a prediction point if this reading completes a
+    crop cycle and a model is loaded.
+    """
+    records = [build_reading_point(reading)]
+    prediction = None
+    sequence = assembler.add(reading)
+    if sequence is not None and predictor is not None:
+        prediction = predictor.predict_raw(sequence)[0]
+        records.append(build_prediction_point(reading, prediction))
+    return records, prediction
 
 
 class MQTTInfluxBridge:
@@ -189,12 +227,8 @@ class MQTTInfluxBridge:
 
     def process_reading(self, reading: SensorReading) -> dict | None:
         """Write the reading; if it completes a cycle, predict and write that too."""
-        records = [build_reading_point(reading)]
-        prediction = None
-        sequence = self.assembler.add(reading)
-        if sequence is not None and self.predictor is not None:
-            prediction = self.predictor.predict_raw(sequence)[0]
-            records.append(build_prediction_point(reading, prediction))
+        records, prediction = reading_to_records(reading, self.assembler, self.predictor)
+        if prediction is not None:
             self.stats['predictions'] += 1
             logger.info("%s cycle %d -> %s (p=%.2f, risk=%.2f%s)", reading.station_id,
                         reading.cycle_id, prediction['label_name'], prediction['confidence'],

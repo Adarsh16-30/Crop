@@ -25,12 +25,11 @@ import time
 import numpy as np
 
 from src.config import load_mqtt_config, make_mqtt_client
-from src.constants import BANDS
+from src.constants import BANDS, PROFILE_LABELS
 from src.data.data_generator import field_zone_baseline, generate_spectral_sequence
 
 logger = logging.getLogger(__name__)
 
-PROFILE_LABELS = {'healthy': 0, 'early_stress': 1, 'active_disease': 2}
 PROFILE_WEIGHTS = [0.5, 0.3, 0.2]
 
 
