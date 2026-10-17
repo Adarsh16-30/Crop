@@ -52,6 +52,19 @@ class TestCNNLSTMModel:
     def test_all_parameters_receive_gradients(self):
         assert _has_gradients(CNNLSTMModel(n_bands=12, seq_len=30), torch.randn(4, 30, 12))
 
+    def test_without_attention_uses_last_step(self):
+        model = CNNLSTMModel(n_bands=12, seq_len=5, attention=False)
+        assert model.attention is None
+        out, weights = model(torch.randn(3, 5, 12), return_attention=True)
+        assert out.shape == (3, 3) and torch.equal(weights[:, -1], torch.ones(3))
+
+    def test_widths_scale_with_hidden_size(self):
+        small = CNNLSTMModel(n_bands=12, seq_len=5, lstm_hidden=16)
+        large = CNNLSTMModel(n_bands=12, seq_len=5, lstm_hidden=128)
+        assert small.conv_channels == [8, 16]
+        count = lambda m: sum(p.numel() for p in m.parameters())  # noqa: E731
+        assert count(small) * 20 < count(large)
+
     def test_custom_conv_channels(self):
         model = CNNLSTMModel(n_bands=12, seq_len=30, conv_channels=[16, 32, 64])
         assert model(torch.randn(4, 30, 12)).shape == (4, 3)
@@ -59,10 +72,21 @@ class TestCNNLSTMModel:
 
 class TestFactory:
 
-    @pytest.mark.parametrize('model_type,cls', [('lstm', SpectralLSTM),
-                                                ('cnn_lstm', CNNLSTMModel)])
-    def test_build_model(self, model_type, cls):
-        assert isinstance(build_model(model_type, input_dim=12, hidden_dim=16), cls)
+    @pytest.mark.parametrize('model_type,cls,attention', [
+        ('lstm', SpectralLSTM, None), ('cnn_lstm', CNNLSTMModel, False),
+        ('cnn_lstm_attention', CNNLSTMModel, True)])
+    def test_build_model(self, model_type, cls, attention):
+        model = build_model(model_type, input_dim=12, hidden_dim=16)
+        assert isinstance(model, cls)
+        if attention is not None:
+            assert model.use_attention is attention
+
+    def test_attention_config_round_trip(self):
+        config = {'model_type': 'cnn_lstm_attention', 'input_dim': 12, 'seq_len': 5,
+                  'hidden_dim': 16, 'num_layers': 1, 'dropout': 0.5, 'conv_channels': [8, 16]}
+        model = build_model_from_config(config)
+        build_model_from_config(config).load_state_dict(model.state_dict())
+        assert model.use_attention and model.conv_channels == [8, 16]
 
     def test_unknown_type_raises(self):
         with pytest.raises(ValueError):

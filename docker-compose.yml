@@ -114,13 +114,18 @@ services:
     <<: *app
     container_name: crop-bridge
     command: ["python", "-m", "src.dashboard.mqtt_subscriber",
-              "--model-path", "models/checkpoints/lstm_best.pt"]
+              "--model-path", "models/checkpoints/cnn_lstm_attention_best.pt"]
     depends_on: [mosquitto, influxdb]
 
   simulator:
     <<: *app
     container_name: crop-simulator
-    command: ["python", "-m", "src.data.mqtt_publisher", "--profile", "mixed"]
+    command: ["python", "-m", "src.data.mqtt_publisher"]
+    volumes:
+      # real sequences to replay, and the split so only held-out sites are streamed
+      - ./data/real/cdm_s2:/app/data/real/cdm_s2:ro
+      - ./data/processed/sample_meta.csv:/app/data/processed/sample_meta.csv:ro
+      - ./certs/mqtt/ca.crt:/app/certs/ca.crt:ro
     depends_on: [mosquitto]
 
 volumes:

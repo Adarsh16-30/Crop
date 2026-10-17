@@ -1,7 +1,7 @@
 {
   "uid": "crop-models",
   "title": "Crop Disease — Model Performance",
-  "description": "Live model behaviour (accuracy against simulator ground truth, confidence, out-of-distribution rate) and the offline evaluation published by run_pipeline.py. All offline numbers are on SYNTHETIC data.",
+  "description": "Live model behaviour on replayed real Sentinel-2 sequences (agreement with their CDM labels, confidence, out-of-distribution rate) and the offline evaluation published by run_pipeline.py (CDM + Sentinel-2, weak labels).",
   "tags": [
     "crop"
   ],
@@ -246,7 +246,7 @@
     {
       "type": "table",
       "title": "Live confusion matrix (rows = true profile)",
-      "description": "Counts of live predictions by simulated truth (row) and model output (column)",
+      "description": "Counts of live predictions by CDM label of the replayed sequence (row) and model output (column)",
       "targets": [
         {
           "datasource": {
@@ -574,7 +574,7 @@
     },
     {
       "type": "row",
-      "title": "Offline evaluation — pipeline run $run_id (synthetic test set)",
+      "title": "Offline evaluation — pipeline run $run_id (CDM + Sentinel-2 test sites)",
       "collapsed": false,
       "panels": [],
       "id": 8,
@@ -1587,7 +1587,7 @@
     {
       "type": "geomap",
       "title": "Batch risk map — every sample, best model",
-      "description": "Pipeline predictions for all samples (train/val/test). The generator assigns disease independently of location, so no real hotspots are expected.",
+      "description": "Pipeline predictions for all samples (train/val/test) at the real CDM report sites. Labels are time-relative, so a site colour shows where its sequences fall in the outbreak timeline.",
       "targets": [
         {
           "datasource": {

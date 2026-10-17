@@ -12,7 +12,7 @@ from src.inference.pipeline import FeaturePipeline
 from src.inference.predictor import Predictor, load_checkpoint_dict
 from src.training.train import compute_class_weights, fit_temperature
 
-from .conftest import SEQ_LEN
+from .conftest import SEQ_LEN, context_at
 
 
 class TestCheckpoint:
@@ -21,7 +21,7 @@ class TestCheckpoint:
         ckpt = load_checkpoint_dict(tiny_checkpoint)  # would raise on pickled objects
         cfg = ckpt['config']
         assert cfg['model_type'] == 'lstm' and cfg['seq_len'] == SEQ_LEN
-        assert cfg['scaler']['feature_names'][-1] == 'CRI'
+        assert cfg['scaler']['feature_names'][-5:] == ['CRI', 'doy_sin', 'doy_cos', 'lat', 'lon']
         assert cfg['temperature'] > 0
         assert set(cfg['versions']) == {'torch', 'numpy', 'sklearn'}
         assert 'val_macro_f1' in ckpt
@@ -35,17 +35,41 @@ class TestCheckpoint:
 class TestTrainServeParity:
 
     def test_raw_api_path_equals_offline_path(self, tiny_checkpoint, tiny_data,
-                                              raw_test_sequences):
+                                              raw_test_sequences, raw_test_context):
         """The bug this guards against: serving raw values to a model trained on scaled ones."""
         predictor = Predictor(tiny_checkpoint, device=torch.device('cpu'))
+        assert predictor.uses_context
         offline = predictor.predict_proba_scaled(tiny_data['X_test'])
-        online = np.array([r['probabilities'] for r in predictor.predict_raw(raw_test_sequences)])
+        online = np.array([r['probabilities'] for r in
+                           predictor.predict_raw(raw_test_sequences, **raw_test_context)])
+        assert np.isfinite(online).all()      # assert_allclose would treat NaN == NaN
         np.testing.assert_allclose(online, offline, atol=1e-5)
 
-    def test_feature_pipeline_matches_preprocessed_arrays(self, tiny_data, raw_test_sequences):
+    def test_feature_pipeline_matches_preprocessed_arrays(self, tiny_data, raw_test_sequences,
+                                                          raw_test_context):
         pipeline = FeaturePipeline.from_dict(tiny_data['scaler_params'])
-        np.testing.assert_allclose(pipeline.transform_raw(raw_test_sequences),
+        np.testing.assert_allclose(pipeline.transform_raw(raw_test_sequences, **raw_test_context),
                                    tiny_data['X_test'], atol=1e-4)
+
+    def test_context_model_requires_dates_and_location(self, tiny_checkpoint,
+                                                       raw_test_sequences, raw_test_context):
+        predictor = Predictor(tiny_checkpoint, device=torch.device('cpu'))
+        with pytest.raises(ValueError, match='dates, lat, lon'):
+            predictor.predict_raw(raw_test_sequences[0])
+        ctx = context_at(raw_test_context, 0)
+        with pytest.raises(ValueError, match='one date per reading'):
+            predictor.predict_raw(raw_test_sequences[0], **{**ctx, 'dates': ctx['dates'][:-1]})
+        with pytest.raises(ValueError, match='lat must be'):
+            predictor.predict_raw(raw_test_sequences[0], **{**ctx, 'lat': 95.0})
+
+    def test_spectral_only_pipeline_ignores_context(self, scaler_params, raw_test_sequences):
+        n = 12
+        spectral = {**scaler_params, 'mean': scaler_params['mean'][:n],
+                    'scale': scaler_params['scale'][:n],
+                    'feature_names': scaler_params['feature_names'][:n]}
+        pipeline = FeaturePipeline.from_dict(spectral)
+        assert not pipeline.uses_context
+        assert pipeline.transform_raw(raw_test_sequences).shape[-1] == n
 
 
 class TestInputValidation:
@@ -54,28 +78,32 @@ class TestInputValidation:
     def predictor(self, tiny_checkpoint):
         return Predictor(tiny_checkpoint, device=torch.device('cpu'))
 
-    def test_wrong_length_rejected(self, predictor):
+    @pytest.fixture
+    def ctx(self, raw_test_context):
+        return context_at(raw_test_context, 0)
+
+    def test_wrong_length_rejected(self, predictor, ctx):
         with pytest.raises(ValueError, match='exactly'):
-            predictor.predict_raw(np.full((SEQ_LEN + 5, 6), 0.4))
+            predictor.predict_raw(np.full((SEQ_LEN + 5, 6), 0.4), **ctx)
 
-    def test_wrong_band_count_rejected(self, predictor):
+    def test_wrong_band_count_rejected(self, predictor, ctx):
         with pytest.raises(ValueError):
-            predictor.predict_raw(np.full((SEQ_LEN, 5), 0.4))
+            predictor.predict_raw(np.full((SEQ_LEN, 5), 0.4), **ctx)
 
-    def test_nan_rejected(self, predictor):
+    def test_nan_rejected(self, predictor, ctx):
         x = np.full((SEQ_LEN, 6), 0.4)
         x[3, 2] = np.nan
         with pytest.raises(ValueError):
-            predictor.predict_raw(x)
+            predictor.predict_raw(x, **ctx)
 
-    def test_absurd_input_flagged_out_of_distribution(self, predictor, raw_test_sequences):
-        normal = predictor.predict_raw(raw_test_sequences[0])[0]
+    def test_absurd_input_flagged_out_of_distribution(self, predictor, raw_test_sequences, ctx):
+        normal = predictor.predict_raw(raw_test_sequences[0], **ctx)[0]
         weird = np.tile([0.01, 0.99, 0.01, 0.99, 0.99, 0.01], (SEQ_LEN, 1))
         assert not normal['out_of_distribution']
-        assert predictor.predict_raw(weird)[0]['out_of_distribution']
+        assert predictor.predict_raw(weird, **ctx)[0]['out_of_distribution']
 
-    def test_result_fields(self, predictor, raw_test_sequences):
-        r = predictor.predict_raw(raw_test_sequences[0])[0]
+    def test_result_fields(self, predictor, raw_test_sequences, ctx):
+        r = predictor.predict_raw(raw_test_sequences[0], **ctx)[0]
         assert sum(r['probabilities']) == pytest.approx(1.0, abs=1e-5)
         assert 0 <= r['risk_score'] <= 1
         assert r['confidence'] == max(r['probabilities'])

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "crop-disease-detection"
 version = "2.0.0"
-description = "Pre-symptomatic crop disease detection from multispectral time series (synthetic-data research prototype)"
+description = "Crop disease detection from Sentinel-2 time series labelled by CDM outbreak reports (research prototype)"
 readme = "README.md"
 requires-python = ">=3.12"
 dynamic = ["dependencies"]
@@ -36,7 +36,6 @@ skip_empty = true
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["notebooks", "demo_pipeline.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]

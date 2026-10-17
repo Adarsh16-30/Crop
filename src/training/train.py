@@ -84,12 +84,20 @@ def create_data_loaders(
     return train_loader, val_loader
 
 
-def train_one_epoch(model, train_loader, criterion, optimizer, device) -> tuple[float, float]:
-    """Train for one epoch. Returns (mean loss, accuracy)."""
+def train_one_epoch(model, train_loader, criterion, optimizer, device,
+                    noise_std: float = 0.0) -> tuple[float, float]:
+    """
+    Train for one epoch. Returns (mean loss, accuracy).
+
+    `noise_std` adds Gaussian noise to the (standardized) inputs of every
+    batch: a cheap regularizer against memorizing a small training set.
+    """
     model.train()
     total_loss, correct, total = 0.0, 0, 0
     for X_batch, y_batch in train_loader:
         X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+        if noise_std > 0:
+            X_batch = X_batch + noise_std * torch.randn_like(X_batch)
         optimizer.zero_grad()
         logits = model(X_batch)
         loss = criterion(logits, y_batch)
@@ -133,7 +141,8 @@ def fit_temperature(logits: torch.Tensor, labels: torch.Tensor, max_iter: int = 
     of softmax(logits / T) on held-out data. Does not change argmax.
     """
     log_t = torch.zeros(1, requires_grad=True)
-    optimizer = torch.optim.LBFGS([log_t], lr=0.1, max_iter=max_iter)
+    optimizer = torch.optim.LBFGS([log_t], lr=0.1, max_iter=max_iter,
+                                  line_search_fn='strong_wolfe')
     nll = nn.CrossEntropyLoss()
 
     def closure():
@@ -144,6 +153,9 @@ def fit_temperature(logits: torch.Tensor, labels: torch.Tensor, max_iter: int = 
 
     optimizer.step(closure)
     temperature = float(log_t.exp().item())
+    if not np.isfinite(temperature):
+        logger.warning("Temperature fit diverged; leaving the model uncalibrated (T=1)")
+        return 1.0
     return float(np.clip(temperature, 0.05, 20.0))
 
 
@@ -167,10 +179,20 @@ def train_model(
     patience: int = 10,
     checkpoint_dir: str = 'models/checkpoints',
     model_name: str = 'model',
-    log_dir: str = 'reports'
+    log_dir: str = 'reports',
+    noise_std: float = 0.0,
+    early_stopping: bool = True,
+    temperature: float | None = None,
+    extra_config: dict | None = None
 ) -> dict:
     """
     Full training loop with early stopping on validation macro-F1.
+
+    With `early_stopping=False` it trains exactly `epochs` epochs and keeps
+    the final weights (validation metrics are only logged). `temperature`,
+    if given, is stored instead of fitting one on the validation set, e.g.
+    a temperature fitted on out-of-fold predictions. `extra_config` is
+    merged into the checkpoint config.
 
     Parameters
     ----------
@@ -214,7 +236,7 @@ def train_model(
     start_time = time.time()
 
     def save(epoch: int, val: dict, temperature: float = 1.0) -> None:
-        config = dict(model_config, temperature=temperature,
+        config = dict(model_config, **(extra_config or {}), temperature=temperature,
                       label_names={str(k): v for k, v in LABEL_NAMES.items()},
                       num_classes=NUM_CLASSES, versions=library_versions())
         torch.save({
@@ -228,7 +250,8 @@ def train_model(
         }, best_path)
 
     for epoch in range(1, epochs + 1):
-        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device,
+                                                noise_std=noise_std)
         val = validate(model, val_loader, criterion, device)
         scheduler.step(val['macro_f1'])
         lr = optimizer.param_groups[0]['lr']
@@ -248,7 +271,7 @@ def train_model(
                         epoch, epochs, train_loss, train_acc, val['loss'], val['acc'],
                         val['macro_f1'], lr, time.time() - start_time)
 
-        improved = (val['macro_f1'] > best['macro_f1'] or
+        improved = (not early_stopping or val['macro_f1'] > best['macro_f1'] or
                     (val['macro_f1'] == best['macro_f1'] and val['loss'] < best['loss']))
         if improved:
             best = {**val, 'epoch': epoch}
@@ -261,11 +284,13 @@ def train_model(
                             epoch, patience)
                 break
 
-    # Calibrate the best model on the validation set and re-save.
+    # Calibrate the best model on the validation set (unless a temperature
+    # was supplied) and re-save.
     ckpt = load_checkpoint_dict(best_path, device)
     model.load_state_dict(ckpt['model_state_dict'])
-    val_logits, val_labels = collect_logits(model, val_loader, device)
-    temperature = fit_temperature(val_logits, val_labels)
+    if temperature is None:
+        val_logits, val_labels = collect_logits(model, val_loader, device)
+        temperature = fit_temperature(val_logits, val_labels)
     save(best['epoch'], best, temperature=temperature)
 
     total_time = time.time() - start_time
@@ -310,7 +335,11 @@ def train_from_arrays(
     patience: int = 10,
     seed: int = 42,
     checkpoint_dir: str = 'models/checkpoints',
-    log_dir: str = 'reports'
+    log_dir: str = 'reports',
+    noise_std: float = 0.0,
+    early_stopping: bool = True,
+    temperature: float | None = None,
+    extra_config: dict | None = None
 ) -> dict:
     """Build, train and calibrate one model from preprocessed split arrays."""
     set_seed(seed)
@@ -327,6 +356,8 @@ def train_from_arrays(
         'num_layers': int(model.num_layers if model_type == 'lstm'
                           else model.lstm.num_layers),
         'dropout': float(dropout),
+        'conv_channels': [int(c) for c in getattr(model, 'conv_channels', [])] or None,
+        'noise_std': float(noise_std),
         'scaler': {k: scaler_params[k] for k in ('mean', 'scale', 'feature_names', 'seq_len')},
         'seed': int(seed),
     }
@@ -339,7 +370,8 @@ def train_from_arrays(
         model, train_loader, val_loader, device, y_train=y_train,
         model_config=model_config, epochs=epochs, learning_rate=learning_rate,
         weight_decay=weight_decay, patience=patience, checkpoint_dir=checkpoint_dir,
-        model_name=model_type, log_dir=log_dir
+        model_name=model_type, log_dir=log_dir, noise_std=noise_std,
+        early_stopping=early_stopping, temperature=temperature, extra_config=extra_config
     )
 
 

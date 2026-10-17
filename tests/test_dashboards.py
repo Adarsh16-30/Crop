@@ -153,14 +153,14 @@ class TestBridgePoints:
 
 class TestSeedHistory:
 
-    def test_backfill_runs_through_the_real_bridge_path(self, tiny_checkpoint):
+    def test_backfill_runs_through_the_real_bridge_path(self, tiny_checkpoint, replay_sites):
         from src.dashboard.seed_history import simulate_history
         from src.inference.predictor import Predictor
 
         predictor = Predictor(tiny_checkpoint, device=torch.device('cpu'))
         end = 1_800_000_000.0
         out = list(simulate_history(predictor, hours=0.5, interval_s=30, n_stations=2,
-                                    end_time=end))
+                                    end_time=end, sites=replay_sites))
         readings = [recs[0] for recs, _ in out]
         preds = [p for _, p in out if p is not None]
 
@@ -173,16 +173,17 @@ class TestSeedHistory:
         pred_points = [recs[1] for recs, p in out if p is not None]
         assert all('correct' in p._fields for p in pred_points)
 
-    def test_backfill_stations_match_live_simulator(self, tiny_checkpoint):
+    def test_backfill_stations_match_live_replay(self, tiny_checkpoint, replay_sites):
         from src.dashboard.seed_history import simulate_history
         from src.data.mqtt_publisher import SpectralPublisher
         from src.inference.predictor import Predictor
 
         predictor = Predictor(tiny_checkpoint, device=torch.device('cpu'))
-        first = next(simulate_history(predictor, hours=0.01, interval_s=30, n_stations=3))
+        first = next(simulate_history(predictor, hours=0.01, interval_s=30, n_stations=3,
+                                      sites=replay_sites))
         live = SpectralPublisher({'topic': 't', 'client_id': 'c', 'qos': 1, 'keepalive': 60,
                                   'username': None, 'password': None, 'tls_ca_file': None},
-                                 n_stations=3, seed=42)
+                                 n_stations=3, seed=42, sites=replay_sites)
         assert first[0][0]._tags['lat'] == f"{live.stations[0]['lat']:.4f}"
 
 

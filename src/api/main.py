@@ -5,7 +5,9 @@ REST API for crop disease prediction from RAW multispectral readings.
 
 Clients send the 6 raw band reflectances per timestep; the server computes
 the vegetation indices and applies the training scaler itself (via the
-shared src.inference pipeline), so there is no train/serve skew.
+shared src.inference pipeline), so there is no train/serve skew. Models
+trained with acquisition context (GET /info -> requires_context) also need
+the date of every reading and the field location.
 
 Endpoints:
     POST /predict        one sequence  -> prediction
@@ -64,7 +66,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 class Settings:
     def __init__(self):
         self.checkpoint_path = os.environ.get('MODEL_CHECKPOINT',
-                                              'models/checkpoints/lstm_best.pt')
+                                              'models/checkpoints/cnn_lstm_attention_best.pt')
         self.api_keys = {k.strip() for k in os.environ.get('API_KEYS', '').split(',')
                          if k.strip()}
         self.allow_unauthenticated = _env_bool('API_ALLOW_UNAUTHENTICATED')
@@ -84,15 +86,22 @@ settings = Settings()
 Reflectance = Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False)]
 Reading = Annotated[list[Reflectance], Field(min_length=len(BANDS), max_length=len(BANDS))]
 Sequence = Annotated[list[Reading], Field(min_length=1, max_length=1000)]
+IsoDate = Annotated[str, Field(pattern=r'^\d{4}-\d{2}-\d{2}$')]
+Dates = Annotated[list[IsoDate], Field(min_length=1, max_length=1000)]
+Latitude = Annotated[float, Field(ge=-90, le=90, allow_inf_nan=False)]
+Longitude = Annotated[float, Field(ge=-180, le=180, allow_inf_nan=False)]
 
-EXAMPLE_READING = [0.35, 0.55, 0.65, 0.80, 0.20, 0.15]
+EXAMPLE_READING = [0.08, 0.13, 0.15, 0.18, 0.20, 0.11]
+EXAMPLE_DATES = ['2023-06-01', '2023-06-06', '2023-06-11', '2023-06-16', '2023-06-21']
 
 
 class SpectralInput(BaseModel):
     """One sensor's time series of raw band reflectances."""
     model_config = ConfigDict(
         extra='forbid',
-        json_schema_extra={'examples': [{'readings': [EXAMPLE_READING] * 30}]},
+        json_schema_extra={'examples': [{'readings': [EXAMPLE_READING] * 5,
+                                         'dates': EXAMPLE_DATES,
+                                         'lat': 39.59, 'lon': -74.69}]},
     )
     readings: Sequence = Field(
         ...,
@@ -100,11 +109,18 @@ class SpectralInput(BaseModel):
                     f"reflectance in [0, 1], band order: {BANDS}. seq_len must equal "
                     "the model's training length (see GET /info).",
     )
+    dates: Dates | None = Field(None, description="Acquisition date (YYYY-MM-DD) of every "
+                                "reading; required when GET /info says requires_context.")
+    lat: Latitude | None = Field(None, description="Field latitude (requires_context).")
+    lon: Longitude | None = Field(None, description="Field longitude (requires_context).")
 
 
 class BatchInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     sequences: list[Sequence] = Field(..., min_length=1)
+    dates: list[Dates] | None = Field(None, description="One date list per sequence")
+    lat: list[Latitude] | None = Field(None, description="One latitude per sequence")
+    lon: list[Longitude] | None = Field(None, description="One longitude per sequence")
 
 
 class PredictionResponse(BaseModel):
@@ -136,6 +152,7 @@ class ModelInfoResponse(BaseModel):
     input_features: list[str]
     raw_bands: list[str]
     seq_len: int
+    requires_context: bool = Field(description="Requests must include dates, lat and lon")
     hidden_dim: int
     num_layers: int
     num_classes: int
@@ -288,7 +305,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Crop Disease Detection API",
     description="Predicts crop disease state from raw multispectral time series. "
-                "Trained on synthetic data only -- see README limitations.",
+                "Trained on Sentinel-2 sequences labelled by CDM outbreak reports "
+                "(weak, time-relative labels) -- see README limitations.",
     version="2.0.0",
     lifespan=lifespan,
 )
@@ -305,18 +323,32 @@ def require_model() -> Predictor:
     return state.predictor
 
 
-def _predict(predictor: Predictor, sequences: list[list[list[float]]]) -> list[PredictionResponse]:
+def _predict(predictor: Predictor, sequences: list[list[list[float]]], dates=None, lat=None,
+             lon=None) -> list[PredictionResponse]:
     lengths = {len(s) for s in sequences}
     if lengths != {predictor.seq_len}:
         raise HTTPException(
             status_code=422,
             detail=f"Each sequence must have exactly {predictor.seq_len} timesteps "
                    f"(got lengths {sorted(lengths)})")
+    if predictor.uses_context:
+        if dates is None or lat is None or lon is None:
+            raise HTTPException(status_code=422, detail="This model needs 'dates' (one per "
+                                "reading), 'lat' and 'lon' with the readings")
+        n = len(sequences)
+        if ((len(dates), len(lat), len(lon)) != (n, n, n)
+                or any(len(d) != predictor.seq_len for d in dates)):
+            raise HTTPException(status_code=422, detail="Need one date per reading and one "
+                                "lat / lon per sequence")
 
     start = time.perf_counter()
     try:
         with LATENCY.time():
-            raw_results = predictor.predict_raw(np.asarray(sequences, dtype=np.float64))
+            raw_results = predictor.predict_raw(
+                np.asarray(sequences, dtype=np.float64),
+                dates=None if dates is None else np.asarray(dates),
+                lat=None if lat is None else np.asarray(lat, dtype=np.float64),
+                lon=None if lon is None else np.asarray(lon, dtype=np.float64))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -375,6 +407,7 @@ def model_info(_: str = Depends(authorize), predictor: Predictor = Depends(requi
         input_features=predictor.features.feature_names,
         raw_bands=BANDS,
         seq_len=predictor.seq_len,
+        requires_context=predictor.uses_context,
         hidden_dim=cfg['hidden_dim'],
         num_layers=cfg['num_layers'],
         num_classes=len(LABEL_NAMES),
@@ -392,7 +425,10 @@ def model_info(_: str = Depends(authorize), predictor: Predictor = Depends(requi
 def predict(data: SpectralInput, _: str = Depends(authorize),
             predictor: Predictor = Depends(require_model)):
     """Predict disease state for one sequence of raw band readings."""
-    return _predict(predictor, [data.readings])[0]
+    return _predict(predictor, [data.readings],
+                    dates=None if data.dates is None else [data.dates],
+                    lat=None if data.lat is None else [data.lat],
+                    lon=None if data.lon is None else [data.lon])[0]
 
 
 @app.post('/predict/batch', response_model=BatchResponse)
@@ -402,7 +438,8 @@ def predict_batch(data: BatchInput, _: str = Depends(authorize),
     if len(data.sequences) > settings.max_batch_size:
         raise HTTPException(status_code=422,
                             detail=f"At most {settings.max_batch_size} sequences per batch")
-    return BatchResponse(predictions=_predict(predictor, data.sequences))
+    return BatchResponse(predictions=_predict(predictor, data.sequences, data.dates,
+                                              data.lat, data.lon))
 
 
 @app.get('/metrics')

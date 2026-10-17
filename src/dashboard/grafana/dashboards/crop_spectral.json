@@ -802,8 +802,8 @@
     },
     {
       "type": "histogram",
-      "title": "NDVI by true simulator profile",
-      "description": "How well NDVI alone separates healthy from diseased crops (simulated ground truth)",
+      "title": "NDVI by true label",
+      "description": "How well NDVI alone separates the time-relative CDM labels of the replayed real sequences",
       "targets": [
         {
           "datasource": {

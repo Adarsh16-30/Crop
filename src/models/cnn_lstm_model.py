@@ -1,43 +1,54 @@
 """
-CNN-LSTM Hybrid Model for Spectral Disease Detection
-=====================================================
-1D CNN extracts local spectral patterns within each timestep,
-LSTM captures temporal progression of disease indicators.
+CNN-LSTM and CNN-LSTM-Attention Models
+======================================
+A 1-D CNN over time extracts local spectral-temporal patterns, an LSTM
+models the temporal progression, and the sequence is pooled into one
+vector for the classifier:
 
-Architecture:
-    Input (batch, seq_len, n_bands)
-    → Permute to (batch, n_bands, seq_len)
-    → Conv1d layers for spectral feature extraction
-    → Permute back to (batch, seq_len, conv_features)
-    → LSTM for temporal modeling
-    → Linear classifier
+    Input (batch, seq_len, n_features)
+    -> Conv1d blocks over the time axis (BatchNorm, ReLU, dropout)
+    -> LSTM
+    -> pooling:  attention=True   learned temporal attention: a weighted
+                                  sum of all LSTM outputs (CNN-LSTM-Attention)
+                 attention=False  last LSTM output (plain CNN-LSTM, the ablation)
+    -> classifier head
+
+The attention weights say which acquisitions the model relied on; get them
+with forward(x, return_attention=True).
+
+Layer widths scale with `lstm_hidden` (conv channels hidden/2 and hidden,
+head hidden/2) so that a small configuration really is small. That matters
+on the real data, which has a few hundred sequences.
 """
 
 import torch
 import torch.nn as nn
 
 
+def default_conv_channels(lstm_hidden: int) -> list[int]:
+    return [max(8, lstm_hidden // 2), lstm_hidden]
+
+
 class CNNLSTMModel(nn.Module):
     """
-    CNN-LSTM hybrid model combining convolutional spectral feature
-    extraction with recurrent temporal modeling.
-
     Parameters
     ----------
     n_bands : int
-        Number of input spectral features per timestep.
+        Input features per timestep.
     seq_len : int
-        Number of timesteps in input sequence.
+        Timesteps per sequence.
     num_classes : int
-        Number of output disease classes.
-    conv_channels : list[int]
-        Number of output channels for each Conv1d layer.
+        Output classes.
+    conv_channels : list[int] or None
+        Output channels of each Conv1d block (default: scaled from lstm_hidden).
     lstm_hidden : int
-        LSTM hidden state size.
+        LSTM hidden size.
     lstm_layers : int
-        Number of LSTM layers.
+        LSTM layers.
     dropout : float
-        Dropout rate.
+        Dropout in the head (half of it after each conv block).
+    attention : bool
+        Temporal attention pooling (True) or last-timestep pooling (False).
     """
 
     def __init__(
@@ -48,60 +59,38 @@ class CNNLSTMModel(nn.Module):
         conv_channels: list[int] | None = None,
         lstm_hidden: int = 128,
         lstm_layers: int = 1,
-        dropout: float = 0.3
+        dropout: float = 0.3,
+        attention: bool = True,
     ):
         super().__init__()
-        if conv_channels is None:
-            conv_channels = [32, 64]
-
+        conv_channels = list(conv_channels or default_conv_channels(lstm_hidden))
         self.n_bands = n_bands
         self.seq_len = seq_len
+        self.conv_channels = conv_channels
+        self.use_attention = attention
 
-        # Build CNN layers dynamically
-        cnn_layers = []
-        in_channels = n_bands
-        for out_channels in conv_channels:
-            cnn_layers.extend([
-                nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1),
-                nn.BatchNorm1d(out_channels),
-                nn.ReLU(),
-                nn.Dropout(dropout * 0.5),
-            ])
-            in_channels = out_channels
-        self.cnn = nn.Sequential(*cnn_layers)
+        blocks, in_ch = [], n_bands
+        for out_ch in conv_channels:
+            blocks += [nn.Conv1d(in_ch, out_ch, kernel_size=3, padding=1),
+                       nn.BatchNorm1d(out_ch), nn.ReLU(), nn.Dropout(dropout * 0.5)]
+            in_ch = out_ch
+        self.cnn = nn.Sequential(*blocks)
 
-        # LSTM for temporal modeling
-        self.lstm = nn.LSTM(
-            input_size=conv_channels[-1],
-            hidden_size=lstm_hidden,
-            num_layers=lstm_layers,
-            batch_first=True,
-            dropout=dropout if lstm_layers > 1 else 0.0
-        )
+        self.lstm = nn.LSTM(input_size=conv_channels[-1], hidden_size=lstm_hidden,
+                            num_layers=lstm_layers, batch_first=True,
+                            dropout=dropout if lstm_layers > 1 else 0.0)
 
-        # Attention mechanism (optional — improves focus on critical timesteps)
-        self.attention = nn.Sequential(
-            nn.Linear(lstm_hidden, 64),
-            nn.Tanh(),
-            nn.Linear(64, 1)
-        )
-
-        # Classifier
-        self.classifier = nn.Sequential(
-            nn.Linear(lstm_hidden, 64),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(64, num_classes)
-        )
-
+        head = max(8, lstm_hidden // 2)
+        self.attention = nn.Sequential(nn.Linear(lstm_hidden, head), nn.Tanh(),
+                                       nn.Linear(head, 1)) if attention else None
+        self.classifier = nn.Sequential(nn.Linear(lstm_hidden, head), nn.ReLU(),
+                                        nn.Dropout(dropout), nn.Linear(head, num_classes))
         self._init_weights()
 
     def _init_weights(self):
-        """Initialize weights for CNN and classifier layers."""
         for module in self.cnn.modules():
             if isinstance(module, nn.Conv1d):
-                nn.init.kaiming_normal_(module.weight, mode='fan_out',
-                                         nonlinearity='relu')
+                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
             elif isinstance(module, nn.BatchNorm1d):
@@ -110,46 +99,23 @@ class CNNLSTMModel(nn.Module):
 
     def forward(self, x: torch.Tensor, return_attention: bool = False):
         """
-        Forward pass.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input of shape (batch, seq_len, n_bands).
-        return_attention : bool
-            If True, also return attention weights.
-
-        Returns
-        -------
-        torch.Tensor
-            Logits of shape (batch, num_classes).
-        torch.Tensor (optional)
-            Attention weights of shape (batch, seq_len) if return_attention=True.
+        x : (batch, seq_len, n_bands) -> logits (batch, num_classes)
+        [, attention weights (batch, seq_len); a one-hot on the
+        last step when attention is off].
         """
-        # CNN: extract spectral features at each timestep
-        # (batch, seq_len, n_bands) → (batch, n_bands, seq_len)
-        x = x.permute(0, 2, 1)
-        x = self.cnn(x)
-        # (batch, conv_out, seq_len) → (batch, seq_len, conv_out)
-        x = x.permute(0, 2, 1)
-
-        # LSTM: capture temporal progression
-        lstm_out, (hn, cn) = self.lstm(x)
-        # lstm_out: (batch, seq_len, lstm_hidden)
-
-        # Temporal attention
-        attn_scores = self.attention(lstm_out)  # (batch, seq_len, 1)
-        attn_weights = torch.softmax(attn_scores, dim=1)  # (batch, seq_len, 1)
-        context = torch.sum(lstm_out * attn_weights, dim=1)  # (batch, lstm_hidden)
-
-        # Classify
+        x = self.cnn(x.permute(0, 2, 1)).permute(0, 2, 1)
+        lstm_out, _ = self.lstm(x)                                  # (B, T, H)
+        if self.attention is not None:
+            weights = torch.softmax(self.attention(lstm_out), dim=1)  # (B, T, 1)
+            context = (lstm_out * weights).sum(dim=1)
+        else:
+            context = lstm_out[:, -1]
+            weights = torch.zeros_like(lstm_out[..., :1])
+            weights[:, -1] = 1.0
         logits = self.classifier(context)
-
         if return_attention:
-            return logits, attn_weights.squeeze(-1)
+            return logits, weights.squeeze(-1)
         return logits
 
     def predict_proba(self, x: torch.Tensor) -> torch.Tensor:
-        """Get class probabilities via softmax."""
-        logits = self.forward(x)
-        return torch.softmax(logits, dim=-1)
+        return torch.softmax(self.forward(x), dim=-1)

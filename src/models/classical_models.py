@@ -22,18 +22,21 @@ from src.evaluation.evaluate import compute_metrics
 logger = logging.getLogger(__name__)
 
 
-def make_random_forest(n_estimators: int = 200, max_depth: int = 10,
-                       seed: int = 42) -> RandomForestClassifier:
+def make_random_forest(n_estimators: int = 300, max_depth: int | None = 10,
+                       seed: int = 42, min_samples_leaf: int = 1,
+                       max_features: str | float = 'sqrt') -> RandomForestClassifier:
     return RandomForestClassifier(
-        n_estimators=n_estimators, max_depth=max_depth, class_weight='balanced',
-        random_state=seed, n_jobs=-1
+        n_estimators=n_estimators, max_depth=max_depth, min_samples_leaf=min_samples_leaf,
+        max_features=max_features, class_weight='balanced', random_state=seed, n_jobs=-1
     )
 
 
 def make_xgboost(n_estimators: int = 300, max_depth: int = 6, learning_rate: float = 0.05,
-                 seed: int = 42) -> XGBClassifier:
+                 seed: int = 42, min_child_weight: float = 1.0,
+                 reg_lambda: float = 1.0) -> XGBClassifier:
     return XGBClassifier(
         n_estimators=n_estimators, max_depth=max_depth, learning_rate=learning_rate,
+        min_child_weight=min_child_weight, reg_lambda=reg_lambda,
         subsample=0.8, colsample_bytree=0.8, eval_metric='mlogloss',
         random_state=seed, verbosity=0
     )

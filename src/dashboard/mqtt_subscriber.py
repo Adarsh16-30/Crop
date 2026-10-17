@@ -40,6 +40,9 @@ class SensorReading(BaseModel):
     cycle_id: int = Field(ge=0)
     timestep: int = Field(ge=0)
     timestamp: float | None = None
+    # Acquisition date (ISO). Replayed satellite data sends the real image
+    # date; a live sensor may omit it, and then its own timestamp is used.
+    date: str | None = Field(default=None, pattern=r'^\d{4}-\d{2}-\d{2}')
     lat: float = Field(ge=-90, le=90)
     lon: float = Field(ge=-180, le=180)
     red_edge_705: float = Reflectance
@@ -54,6 +57,13 @@ class SensorReading(BaseModel):
     def bands(self) -> list[float]:
         return [getattr(self, b) for b in BANDS]
 
+    def acquisition_date(self) -> str:
+        if self.date:
+            return self.date[:10]
+        if self.timestamp:
+            return datetime.fromtimestamp(self.timestamp, tz=UTC).date().isoformat()
+        return datetime.now(UTC).date().isoformat()
+
 
 @dataclass
 class SequenceAssembler:
@@ -67,6 +77,12 @@ class SequenceAssembler:
     _latest_cycle: dict = field(default_factory=dict)  # station -> cycle_id
 
     def add(self, reading: SensorReading) -> np.ndarray | None:
+        """The completed (seq_len, 6) band sequence, or None."""
+        done = self.collect(reading)
+        return None if done is None else done[0]
+
+    def collect(self, reading: SensorReading) -> tuple[np.ndarray, list[str]] | None:
+        """The completed band sequence and its acquisition dates, or None."""
         station, cycle = reading.station_id, reading.cycle_id
         latest = self._latest_cycle.get(station)
         if latest is not None and cycle < latest:
@@ -78,11 +94,12 @@ class SequenceAssembler:
         if reading.timestep >= self.seq_len:
             return None
         buf = self._buffers.setdefault((station, cycle), {})
-        buf[reading.timestep] = reading.bands()
+        buf[reading.timestep] = (reading.bands(), reading.acquisition_date())
         if len(buf) < self.seq_len:
             return None
         del self._buffers[(station, cycle)]
-        return np.array([buf[t] for t in range(self.seq_len)], dtype=np.float64)
+        steps = [buf[t] for t in range(self.seq_len)]
+        return (np.array([b for b, _ in steps], dtype=np.float64), [d for _, d in steps])
 
 
 def _stamp(point, reading: SensorReading):
@@ -135,7 +152,7 @@ def build_prediction_point(reading: SensorReading, prediction: dict):
     point = point.field('latitude', float(reading.lat)).field('longitude', float(reading.lon))
     for i, prob in enumerate(prediction['probabilities']):
         point = point.field(f'prob_class_{i}', prob)
-    # Simulated streams carry the true profile: record it so the dashboard can
+    # Replayed real sequences carry their CDM label: record it so the dashboard can
     # show live agreement between the model and the ground truth.
     true_label = PROFILE_LABELS.get(reading.profile or '')
     if true_label is not None:
@@ -154,9 +171,11 @@ def reading_to_records(reading: SensorReading, assembler: SequenceAssembler,
     """
     records = [build_reading_point(reading)]
     prediction = None
-    sequence = assembler.add(reading)
-    if sequence is not None and predictor is not None:
-        prediction = predictor.predict_raw(sequence)[0]
+    done = assembler.collect(reading)
+    if done is not None and predictor is not None:
+        sequence, dates = done
+        prediction = predictor.predict_raw(sequence, dates=dates, lat=reading.lat,
+                                           lon=reading.lon)[0]
         records.append(build_prediction_point(reading, prediction))
     return records, prediction
 

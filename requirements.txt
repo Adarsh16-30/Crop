@@ -1,5 +1,7 @@
-# Runtime dependencies. Lower bounds = versions this project is tested with
-# (Python 3.12-3.14); upper bounds stop silent major-version breakage.
+# All dependencies of the project: pipeline, real-data acquisition, API,
+# streaming, dashboards, QAOA and the test / lint tooling.
+# Lower bounds = versions this project is tested with (Python 3.12-3.14);
+# upper bounds stop silent major-version breakage.
 # GPU: install torch from the CUDA index first, e.g.
 #   pip install torch --index-url https://download.pytorch.org/whl/cu121
 
@@ -14,8 +16,18 @@ scikit-learn>=1.5,<2
 xgboost>=2.0,<4
 joblib>=1.3,<2
 
-# --- Quantum-inspired optimization (simulated annealing) ---
-dwave-samplers>=1.2,<2
+# --- Quantum-inspired optimisation ---
+dwave-samplers>=1.2,<2              # simulated annealing for the QUBO
+qiskit>=1.0,<3                      # QAOA (run_pipeline.py --use-qaoa)
+qiskit-optimization>=0.6,<1
+qiskit-algorithms>=0.3,<1
+
+# --- Real data: Sentinel-2, CDM reports, UAV imagery ---
+requests>=2.31,<3
+rasterio>=1.4,<2                    # Sentinel-2 COG window reads
+pystac-client>=0.8,<1               # Earth Search STAC
+opencv-python-headless>=4.9,<6      # MicaSense band alignment, panel detection
+pillow>=10.0,<13                    # MicaSense TIFF metadata
 
 # --- Geo-Spatial ---
 geopandas>=1.0,<2
@@ -35,3 +47,10 @@ prometheus-client>=0.20,<1
 influxdb-client>=1.40,<2
 paho-mqtt>=2.0,<3
 python-dotenv>=1.0,<2
+
+# --- Tests and tooling ---
+pytest>=8.0,<10
+pytest-cov>=5.0,<8
+httpx>=0.27,<1
+ruff>=0.6
+pre-commit>=3.7

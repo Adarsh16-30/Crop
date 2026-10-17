@@ -16,7 +16,7 @@ from src.dashboard.mqtt_subscriber import MQTTInfluxBridge, SensorReading, Seque
 from src.data.mqtt_publisher import SpectralPublisher
 from src.inference.predictor import Predictor
 
-from .conftest import SEQ_LEN
+from .conftest import SEQ_LEN, context_at
 
 MQTT_CFG = {'host': 'localhost', 'port': 8883, 'topic': 'crop/spectral', 'client_id': 'test',
             'keepalive': 60, 'qos': 1, 'username': None, 'password': None, 'tls_ca_file': None}
@@ -31,9 +31,12 @@ def reading(station='S01', cycle=0, t=0, **overrides):
 
 class TestPublisher:
 
-    def test_cycles_match_training_generator_and_carry_ids(self):
-        pub = SpectralPublisher(MQTT_CFG, n_stations=2, cycle_length=SEQ_LEN, seed=1)
+    def test_cycles_replay_real_sequences_and_carry_ids(self, replay_sites):
+        pub = SpectralPublisher(MQTT_CFG, n_stations=2, seed=1, sites=replay_sites)
+        assert pub.cycle_length == SEQ_LEN
         station = pub.stations[0]
+        real = station['trajectory'][BANDS].to_numpy()
+        station_dates = station['trajectory']['date'].to_list()
         msgs = []
         for _ in range(SEQ_LEN + 2):
             msgs.append(pub._generate_reading(station))
@@ -43,14 +46,33 @@ class TestPublisher:
         assert [m['timestep'] for m in msgs[:SEQ_LEN]] == list(range(SEQ_LEN))
         assert {m['cycle_id'] for m in msgs[:SEQ_LEN]} == {0}
         assert msgs[SEQ_LEN]['cycle_id'] == 1 and msgs[SEQ_LEN]['timestep'] == 0
-        SensorReading.model_validate(json.loads(json.dumps(msgs[0])))  # valid payload
+        np.testing.assert_allclose([[m[b] for b in BANDS] for m in msgs[:SEQ_LEN]], real)
+        assert msgs[0]['profile'] in ('healthy', 'early_stress', 'active_disease')
+        parsed = SensorReading.model_validate(json.loads(json.dumps(msgs[0])))  # valid payload
+        assert parsed.acquisition_date() == str(station_dates[0])[:10]
 
-    def test_seeded_and_stable_station_ids(self):
-        a = SpectralPublisher(MQTT_CFG, n_stations=3, seed=5)
-        b = SpectralPublisher(MQTT_CFG, n_stations=3, seed=5)
+    def test_stations_are_real_sites(self, replay_sites):
+        a = SpectralPublisher(MQTT_CFG, n_stations=3, seed=5, sites=replay_sites)
+        b = SpectralPublisher(MQTT_CFG, n_stations=3, seed=5, sites=replay_sites)
         assert [s['station_id'] for s in a.stations] == ['S01', 'S02', 'S03']
-        assert [(s['lat'], s['lon']) for s in a.stations] == \
-            [(s['lat'], s['lon']) for s in b.stations]
+        assert [s['site_id'] for s in a.stations] == [s['site_id'] for s in b.stations]
+        for s in a.stations:
+            seq = replay_sites[s['site_id']][0]
+            assert (s['lat'], s['lon']) == (round(seq['lat'].iloc[0], 6),
+                                            round(seq['lon'].iloc[0], 6))
+
+    def test_replay_restricted_to_split(self, tmp_path):
+        import pandas as pd
+
+        from src.data.mqtt_publisher import load_replay_sequences
+
+        from .conftest import SEQUENCES_CSV
+        ids = pd.read_csv(SEQUENCES_CSV)['sample_id'].unique()
+        meta = tmp_path / 'meta.csv'
+        pd.DataFrame({'sample_id': ids, 'split': ['test'] * 3 + ['train'] * (len(ids) - 3)}
+                     ).to_csv(meta, index=False)
+        sites = load_replay_sequences(SEQUENCES_CSV, str(meta), split='test')
+        assert sum(len(v) for v in sites.values()) == 3
 
 
 class TestPayloadValidation:
@@ -109,7 +131,8 @@ class FakeWriteAPI:
 
 class TestBridgeProcessing:
 
-    def test_full_cycle_produces_one_prediction(self, tiny_checkpoint, raw_test_sequences):
+    def test_full_cycle_produces_one_prediction(self, tiny_checkpoint, raw_test_sequences,
+                                                 raw_test_context):
         bridge = MQTTInfluxBridge.__new__(MQTTInfluxBridge)  # skip network setup
         bridge.predictor = Predictor(tiny_checkpoint, device=torch.device('cpu'))
         bridge.assembler = SequenceAssembler(seq_len=SEQ_LEN)
@@ -118,10 +141,12 @@ class TestBridgeProcessing:
         bridge.stats = {'processed': 0, 'invalid': 0, 'predictions': 0, 'write_errors': 0}
 
         seq = raw_test_sequences[0]
-        preds = [bridge.process_reading(reading(t=t, **dict(zip(BANDS, map(float, row)))))
-                 for t, row in enumerate(seq)]
+        ctx = context_at(raw_test_context, 0)
+        preds = [bridge.process_reading(reading(t=t, date=str(d), lat=ctx['lat'], lon=ctx['lon'],
+                                                **dict(zip(BANDS, map(float, row)))))
+                 for t, (row, d) in enumerate(zip(seq, ctx['dates']))]
         assert all(p is None for p in preds[:-1])
-        expected = bridge.predictor.predict_raw(seq)[0]
+        expected = bridge.predictor.predict_raw(seq, **ctx)[0]
         assert preds[-1]['probabilities'] == pytest.approx(expected['probabilities'], abs=1e-6)
         names = [r._name for r in bridge.write_api.records]
         assert names.count('spectral_readings') == SEQ_LEN

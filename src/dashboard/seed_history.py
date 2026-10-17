@@ -1,9 +1,10 @@
 """
-Backfill simulated sensor history into InfluxDB
-================================================
-Live simulation produces one prediction per station every few minutes, so a
-fresh dashboard is mostly empty. This tool writes N hours of *past* readings
-for a set of simulated stations through exactly the same code path as the
+Backfill replayed sensor history into InfluxDB
+===============================================
+The live replay produces one prediction per station every few readings, so
+a fresh dashboard is mostly empty. This tool replays N hours of *past*
+readings -- real Sentinel-2 sequences of held-out CDM sites, exactly as
+src.data.mqtt_publisher streams them -- through the same code path as the
 live bridge (payload validation -> cycle assembly -> model -> InfluxDB
 points), timestamped in the past.
 
@@ -11,7 +12,7 @@ Everything it writes is tagged source="backfill", so the dashboards' Source
 filter can separate it from live data (source="simulator"), and
 `--clear` removes it again.
 
-    python -m src.dashboard.seed_history --model-path models/checkpoints/cnn_lstm_best.pt
+    python -m src.dashboard.seed_history --model-path models/checkpoints/cnn_lstm_attention_best.pt
     python -m src.dashboard.seed_history --hours 24 --interval-s 20 --stations 8
     python -m src.dashboard.seed_history --clear
 """
@@ -32,9 +33,9 @@ MEASUREMENTS = ('spectral_readings', 'disease_predictions')
 
 def simulate_history(predictor, hours: float = 12.0, interval_s: float = 30.0,
                      n_stations: int = 5, seed: int = 42, end_time: float | None = None,
-                     source: str = BACKFILL_SOURCE):
+                     source: str = BACKFILL_SOURCE, sites: dict | None = None):
     """
-    Yield (records, prediction) for every simulated reading, oldest first.
+    Yield (records, prediction) for every replayed reading, oldest first.
 
     Each station takes one reading every `interval_s` seconds over the last
     `hours` hours; stations are offset slightly so they do not all report at
@@ -45,7 +46,7 @@ def simulate_history(predictor, hours: float = 12.0, interval_s: float = 30.0,
     no_network = {'topic': 'crop/spectral', 'client_id': 'backfill', 'qos': 1,
                   'keepalive': 60, 'username': None, 'password': None, 'tls_ca_file': None}
     sim = SpectralPublisher(no_network, n_stations=n_stations,
-                            cycle_length=predictor.seq_len, seed=seed)
+                            cycle_length=predictor.seq_len, seed=seed, sites=sites)
     assembler = SequenceAssembler(seq_len=predictor.seq_len)
 
     end_time = end_time or time.time()
@@ -67,7 +68,7 @@ def simulate_history(predictor, hours: float = 12.0, interval_s: float = 30.0,
 
 
 def seed(influx_cfg: dict, model_path: str, **kwargs) -> dict:
-    """Write simulated history to InfluxDB. Returns counts."""
+    """Write replayed history to InfluxDB. Returns counts."""
     from influxdb_client import InfluxDBClient, WriteOptions
 
     from src.inference.predictor import Predictor
@@ -109,15 +110,15 @@ def clear(influx_cfg: dict, source: str = BACKFILL_SOURCE) -> None:
 
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
-    parser = argparse.ArgumentParser(description='Backfill simulated history into InfluxDB')
-    parser.add_argument('--model-path', default='models/checkpoints/lstm_best.pt')
+    parser = argparse.ArgumentParser(description='Backfill replayed history into InfluxDB')
+    parser.add_argument('--model-path', default='models/checkpoints/cnn_lstm_attention_best.pt')
     parser.add_argument('--hours', type=float, default=12.0)
     parser.add_argument('--interval-s', type=float, default=30.0,
                         help='Seconds between readings of one station')
     parser.add_argument('--stations', type=int, default=5)
     parser.add_argument('--seed', type=int, default=42,
-                        help='Same default as the live simulator (42), so backfilled '
-                             'stations have the same ids and locations as the live ones')
+                        help='Same default as the live replay (42), so backfilled '
+                             'stations have the same ids and sites as the live ones')
     parser.add_argument('--influx-config', default='config/influxdb.ini')
     parser.add_argument('--clear', action='store_true',
                         help='Delete previously backfilled data instead of writing')

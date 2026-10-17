@@ -9,8 +9,10 @@ from src.constants import NUM_CLASSES
 from src.models.cnn_lstm_model import CNNLSTMModel
 from src.models.lstm_model import SpectralLSTM
 
-MODEL_TYPES = ('lstm', 'cnn_lstm')
-DEFAULT_NUM_LAYERS = {'lstm': 2, 'cnn_lstm': 1}
+MODEL_TYPES = ('lstm', 'cnn_lstm', 'cnn_lstm_attention')
+DISPLAY_NAMES = {'lstm': 'LSTM', 'cnn_lstm': 'CNN-LSTM',
+                 'cnn_lstm_attention': 'CNN-LSTM-Attention'}
+DEFAULT_NUM_LAYERS = {'lstm': 2, 'cnn_lstm': 1, 'cnn_lstm_attention': 1}
 
 
 def build_model(
@@ -20,9 +22,10 @@ def build_model(
     num_classes: int = NUM_CLASSES,
     hidden_dim: int = 128,
     dropout: float = 0.3,
-    num_layers: int | None = None
+    num_layers: int | None = None,
+    conv_channels: list[int] | None = None,
 ) -> nn.Module:
-    """Build a model by type name ('lstm' or 'cnn_lstm')."""
+    """Build a model by type name (see MODEL_TYPES)."""
     if model_type not in MODEL_TYPES:
         raise ValueError(f"Unknown model type: {model_type}. Use one of {MODEL_TYPES}.")
     if num_layers is None:
@@ -35,7 +38,8 @@ def build_model(
         )
     return CNNLSTMModel(
         n_bands=input_dim, seq_len=seq_len, num_classes=num_classes,
-        lstm_hidden=hidden_dim, lstm_layers=num_layers, dropout=dropout
+        conv_channels=conv_channels, lstm_hidden=hidden_dim, lstm_layers=num_layers,
+        dropout=dropout, attention=model_type == 'cnn_lstm_attention'
     )
 
 
@@ -49,4 +53,9 @@ def build_model_from_config(config: dict) -> nn.Module:
         hidden_dim=config['hidden_dim'],
         dropout=config.get('dropout', 0.0),
         num_layers=config.get('num_layers'),
+        conv_channels=config.get('conv_channels'),
     )
+
+
+def count_parameters(model: nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)

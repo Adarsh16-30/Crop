@@ -23,9 +23,9 @@ from sklearn.metrics import accuracy_score, f1_score
 
 from src.models.classical_models import (
     cross_validate,
+    fit,
     make_random_forest,
     save_model,
-    train_random_forest,
 )
 from src.quantum.annealing_optimizer import (
     get_solver_info,
@@ -66,9 +66,34 @@ def select_mrmr(X: np.ndarray, y: np.ndarray, k: int, seed: int = 42) -> list[in
     return sorted(selected)
 
 
-def _score_subset(name, idx, X_train, y_train, X_test, y_test, seed) -> dict:
-    cv = cross_validate(make_random_forest(seed=seed), X_train[:, idx], y_train, seed=seed)
-    model = train_random_forest(X_train[:, idx], y_train, seed=seed)
+def select_qubo(X: np.ndarray, y: np.ndarray, max_features: int, rf_params: dict | None = None,
+                lambda_penalty: float = 0.3, correlation_threshold: float = 0.7,
+                seed: int = 42) -> list[int]:
+    """
+    QUBO feature selection on (X, y) alone -- RF importances as relevance,
+    feature correlations as redundancy, solved by simulated annealing -- so
+    it can run inside each fold of a nested CV without seeing the test fold.
+    """
+    rf = fit(make_random_forest(seed=seed, **(rf_params or {})), X, y)
+    relevance = compute_relevance_scores(rf)
+    qubo = build_qubo_matrix(compute_correlation_matrix(X), relevance, X.shape[1],
+                             lambda_penalty=lambda_penalty,
+                             correlation_threshold=correlation_threshold,
+                             max_features=max_features)
+    selected = run_simulated_annealing(qubo, n_reads=1000, seed=seed, max_features=max_features)
+    return sorted(selected) if selected else select_top_k(relevance, max_features)
+
+
+def _score_subset(name, idx, X_train, y_train, X_test, y_test, seed, groups=None,
+                  rf_params=None) -> dict:
+    """
+    CV (grouped when `groups` is given, so near-duplicate samples of one site
+    never straddle a fold) and test scores of an RF on one feature subset.
+    """
+    rf_params = rf_params or {}
+    cv = cross_validate(make_random_forest(seed=seed, **rf_params), X_train[:, idx], y_train,
+                        groups=groups, seed=seed)
+    model = fit(make_random_forest(seed=seed, **rf_params), X_train[:, idx], y_train)
     pred = model.predict(X_test[:, idx])
     return {
         'method': name, 'n_features': len(idx),
@@ -92,10 +117,15 @@ def run_quantum_feature_selection(
     reports_dir: str = 'reports',
     model_dir: str = 'models/checkpoints',
     seed: int = 42,
-    n_random_draws: int = 10
+    n_random_draws: int = 10,
+    groups_train: np.ndarray | None = None,
+    rf_params: dict | None = None
 ) -> dict:
     """
     Run QUBO feature selection and benchmark it against classical selectors.
+
+    `groups_train` (e.g. site ids) makes every CV grouped; `rf_params` are
+    the (tuned) Random Forest settings used for every subset model.
 
     Returns a dict with the selected indices / names, the comparison table
     and the path of the saved QUBO-subset Random Forest.
@@ -156,13 +186,15 @@ def run_quantum_feature_selection(
     if selected_qaoa:
         subsets['qubo_qaoa'] = selected_qaoa
 
-    rows = [_score_subset(name, idx, X_train_agg, y_train_agg, X_test_agg, y_test_agg, seed)
+    score = dict(groups=groups_train, rf_params=rf_params)
+    rows = [_score_subset(name, idx, X_train_agg, y_train_agg, X_test_agg, y_test_agg, seed,
+                          **score)
             for name, idx in subsets.items()]
 
     rng = np.random.default_rng(seed)
     random_rows = [
         _score_subset('random_k', sorted(rng.choice(n_features, max_features, replace=False)),
-                      X_train_agg, y_train_agg, X_test_agg, y_test_agg, seed)
+                      X_train_agg, y_train_agg, X_test_agg, y_test_agg, seed, **score)
         for _ in range(n_random_draws)
     ]
     random_summary = pd.DataFrame(random_rows).drop(columns='method').mean().to_dict()
@@ -172,7 +204,8 @@ def run_quantum_feature_selection(
     logger.info("Feature-selection comparison:\n%s", comparison.round(4).to_string(index=False))
 
     # Close the loop: keep a model that actually uses the QUBO subset.
-    rf_qubo = train_random_forest(X_train_agg[:, selected_sa], y_train_agg, seed=seed)
+    rf_qubo = fit(make_random_forest(seed=seed, **(rf_params or {})),
+                  X_train_agg[:, selected_sa], y_train_agg)
     rf_qubo_path = os.path.join(model_dir, 'rf_qubo_model.joblib')
     save_model(rf_qubo, rf_qubo_path)
 

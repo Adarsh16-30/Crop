@@ -470,8 +470,8 @@ def overview() -> Board:
         'disease_predictions', ['correct'], True, RANGE, 'group()', 'mean()'),
         unit='percentunit', decimals=1, no_value='n/a',
         steps=[(None, 'red'), (0.8, 'orange'), (0.9, 'green')],
-        description='Share of live predictions matching the simulator\'s true profile '
-                    '(only available for simulated stations)'), 4, 4)
+        description='Share of live predictions matching the time-relative CDM label of '
+                    'the replayed sequence (only for replayed stations)'), 4, 4)
 
     b.row('Where and what')
     b.add(geomap('Station risk map (latest prediction)', latest_per_station(
@@ -572,7 +572,7 @@ def spectral() -> Board:
         'spectral_readings', ['NDVI'], True, RANGE, 'group()',
         'keep(columns: ["_time", "_value"])'),
         description='Density of NDVI readings per time bucket'), 12, 9)
-    b.add(histogram('NDVI by true simulator profile', flux(
+    b.add(histogram('NDVI by true label', flux(
         'spectral_readings', ['NDVI'], True, RANGE, 'group(columns: ["profile"])',
         'keep(columns: ["_time", "_value", "profile"])'),
         display_name='${__field.labels.profile}', bucket_size=0.01, fill=35,
@@ -581,8 +581,8 @@ def spectral() -> Board:
                                    prop('color', {'mode': 'fixed', 'fixedColor': color})]}
                    for profile, (name, color) in zip(
                        ('healthy', 'early_stress', 'active_disease'), CLASS_COLORS.values())],
-        description='How well NDVI alone separates healthy from diseased crops '
-                    '(simulated ground truth)'), 12, 9)
+        description='How well NDVI alone separates the time-relative CDM labels '
+                    'of the replayed real sequences'), 12, 9)
     b.add(table('Latest indices per station', latest_per_station(
         ['NDVI', 'NDRE', 'MSI', 'REIP_approx'], 'spectral_readings') +
         '\n  |> keep(columns: ["station_id", "_time", "NDVI", "NDRE", "MSI", "REIP_approx"])',
@@ -604,9 +604,9 @@ def models() -> Board:
     run_var = tag_variable('run_id', 'Pipeline run', 'run_id', 'pipeline_run',
                            include_all=False, sort=2, start='-3650d')
     b = Board('crop-models', 'Crop Disease — Model Performance',
-              'Live model behaviour (accuracy against simulator ground truth, confidence, '
-              'out-of-distribution rate) and the offline evaluation published by '
-              'run_pipeline.py. All offline numbers are on SYNTHETIC data.',
+              'Live model behaviour on replayed real Sentinel-2 sequences (agreement with '
+              'their CDM labels, confidence, out-of-distribution rate) and the offline '
+              'evaluation published by run_pipeline.py (CDM + Sentinel-2, weak labels).',
               [*LIVE_VARS, run_var], time_from='now-24h', refresh='1m')
 
     b.row('Live model (selected time range)')
@@ -624,8 +624,8 @@ def models() -> Board:
         'group(columns: ["true_profile", "predicted"])', 'count()', 'group()',
         'pivot(rowKey: ["true_profile"], columnKey: ["predicted"], valueColumn: "_value")'),
         overrides=[rename('true_profile', 'True profile')],
-        description='Counts of live predictions by simulated truth (row) and model output '
-                    '(column)'), 12, 8)
+        description='Counts of live predictions by CDM label of the replayed sequence '
+                    '(row) and model output (column)'), 12, 8)
     b.add(histogram('Prediction confidence', flux(
         'disease_predictions', ['confidence'], True, RANGE, 'group()',
         'keep(columns: ["_time", "_value"])'), unit='percentunit', bucket_size=0.02,
@@ -645,7 +645,7 @@ def models() -> Board:
         'disease_predictions', ['correct'], True, RANGE, 'group()', 'count()'),
         unit='short'), 4, 8)
 
-    b.row('Offline evaluation — pipeline run $run_id (synthetic test set)')
+    b.row('Offline evaluation — pipeline run $run_id (CDM + Sentinel-2 test sites)')
     for field, title, unit, steps in (
         ('best_model', 'Best model (macro-F1)', 'none', [(None, 'purple')]),
         ('best_f1_macro', 'Best macro-F1', 'percentunit', [(None, 'red'), (0.8, 'orange'),
@@ -726,9 +726,9 @@ def models() -> Board:
                        'sample_id'],
         'pivot(rowKey: ["_time", "split"], columnKey: ["_field"], valueColumn: "_value")',
         'group()'), 'risk_score', size=5, zoom=8,
-        description='Pipeline predictions for all samples (train/val/test). The generator '
-                    'assigns disease independently of location, so no real hotspots '
-                    'are expected.'), 12, 9)
+        description='Pipeline predictions for all samples (train/val/test) at the real '
+                    'CDM report sites. Labels are time-relative, so a site colour shows '
+                    'where its sequences fall in the outbreak timeline.'), 12, 9)
     b.add(timeseries('Macro-F1 across pipeline runs', flux(
         'model_evaluation', ['f1_macro'], False, '  |> range(start: -365d)',
         'keep(columns: ["_time", "_value", "model"])'),
@@ -775,7 +775,7 @@ def system() -> Board:
     b.add(piechart('Data by source', flux(
         'spectral_readings', ['nir_842'], True, RANGE, 'group(columns: ["source"])', 'count()',
         'keep(columns: ["_value", "source"])'), display_name='${__field.labels.source}',
-        description='simulator = live MQTT stream, backfill = seed_history'), 8, 8)
+        description='simulator = live replay over MQTT, backfill = seed_history'), 8, 8)
     b.add(state_timeline('Station heartbeat (readings per 5 min)', flux(
         'spectral_readings', ['nir_842'], True, RANGE,
         'aggregateWindow(every: 5m, fn: count, createEmpty: true)',

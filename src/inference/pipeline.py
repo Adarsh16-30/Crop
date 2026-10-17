@@ -3,7 +3,9 @@ Feature pipeline: raw band readings -> model-ready standardized features.
 
 This is the ONLY place raw sensor values are turned into model input at
 inference time. It mirrors training exactly: compute the vegetation
-indices, then standardize with the scaler fitted on the training split.
+indices, append the acquisition context (day of year, location) when the
+model was trained with it, then standardize with the scaler fitted on the
+training split.
 """
 
 import json
@@ -12,6 +14,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from src.constants import BANDS
+from src.features.context import CONTEXT_FEATURES, context_features
 from src.features.spectral_indices import get_feature_columns, raw_to_features
 
 # |z| above this on any feature marks an input as out-of-distribution.
@@ -28,10 +31,11 @@ class FeaturePipeline:
     @classmethod
     def from_dict(cls, params: dict) -> 'FeaturePipeline':
         names = list(params['feature_names'])
-        if names != get_feature_columns():
+        spectral = get_feature_columns()
+        if names not in (spectral, spectral + CONTEXT_FEATURES):
             raise ValueError(
                 f"Scaler feature order {names} does not match the code's "
-                f"feature order {get_feature_columns()}"
+                f"feature order {spectral} (optionally + {CONTEXT_FEATURES})"
             )
         return cls(
             mean=np.asarray(params['mean'], dtype=np.float64),
@@ -57,19 +61,29 @@ class FeaturePipeline:
     def n_raw(self) -> int:
         return len(BANDS)
 
+    @property
+    def uses_context(self) -> bool:
+        """True when the model also expects acquisition dates and a location."""
+        return self.feature_names[-len(CONTEXT_FEATURES):] == CONTEXT_FEATURES
+
     def standardize(self, features: np.ndarray) -> np.ndarray:
-        """Standardize already-computed (..., 12) features."""
+        """Standardize already-computed (..., n_features) features."""
         z = (np.asarray(features, dtype=np.float64) - self.mean) / self.scale
         return z.astype(np.float32)
 
-    def transform_raw(self, raw: np.ndarray) -> np.ndarray:
+    def transform_raw(self, raw: np.ndarray, dates=None, lat=None, lon=None) -> np.ndarray:
         """
-        Raw bands (..., seq_len, 6) -> standardized features (..., seq_len, 12).
+        Raw bands (..., seq_len, 6) -> standardized features (..., seq_len, F).
+
+        For a model trained with context, `dates` (..., seq_len) are the
+        acquisition dates (ISO strings or day of year) and `lat` / `lon`
+        (scalar or (...,)) the field location; they are ignored otherwise.
 
         Raises
         ------
         ValueError
-            On wrong band count, wrong sequence length or non-finite values.
+            On wrong band count, wrong sequence length, non-finite values or
+            missing / invalid context.
         """
         raw = np.asarray(raw, dtype=np.float64)
         if raw.ndim < 2 or raw.shape[-1] != self.n_raw:
@@ -83,7 +97,17 @@ class FeaturePipeline:
             )
         if not np.isfinite(raw).all():
             raise ValueError("Readings contain NaN or infinite values")
-        return self.standardize(raw_to_features(raw))
+        features = raw_to_features(raw)
+        if self.uses_context:
+            if dates is None or lat is None or lon is None:
+                raise ValueError("This model needs the acquisition dates and the field "
+                                 "location (dates, lat, lon) with the readings")
+            dates = np.asarray(dates)
+            if dates.shape != raw.shape[:-1]:
+                raise ValueError(f"Expected one date per reading, shape {raw.shape[:-1]}, "
+                                 f"got {dates.shape}")
+            features = np.concatenate([features, context_features(dates, lat, lon)], axis=-1)
+        return self.standardize(features)
 
     @staticmethod
     def max_abs_z(scaled: np.ndarray) -> np.ndarray:

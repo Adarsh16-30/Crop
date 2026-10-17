@@ -497,7 +497,7 @@
     {
       "type": "piechart",
       "title": "Data by source",
-      "description": "simulator = live MQTT stream, backfill = seed_history",
+      "description": "simulator = live replay over MQTT, backfill = seed_history",
       "targets": [
         {
           "datasource": {

@@ -77,9 +77,16 @@ class Predictor:
             return np.empty((0, len(self.label_names)))
         return np.concatenate(out)
 
-    def predict_raw(self, readings: np.ndarray) -> list[dict]:
+    @property
+    def uses_context(self) -> bool:
+        return self.features.uses_context
+
+    def predict_raw(self, readings: np.ndarray, dates=None, lat=None, lon=None) -> list[dict]:
         """
         Predict from raw band readings: (seq_len, 6) or (n, seq_len, 6).
+
+        Models trained with acquisition context also need `dates` ((seq_len,)
+        or (n, seq_len)) and the field location `lat` / `lon` (scalar or (n,)).
 
         Each result has the predicted label, calibrated probabilities, the
         probability-weighted risk score and an out-of-distribution flag.
@@ -87,7 +94,9 @@ class Predictor:
         readings = np.asarray(readings, dtype=np.float64)
         if readings.ndim == 2:
             readings = readings[None]
-        scaled = self.features.transform_raw(readings)
+            if dates is not None:
+                dates = np.asarray(dates)[None]
+        scaled = self.features.transform_raw(readings, dates, lat, lon)
         probs = self.predict_proba_scaled(scaled)
         max_z = FeaturePipeline.max_abs_z(scaled)
         risks = np.atleast_1d(expected_risk(probs))

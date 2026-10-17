@@ -18,7 +18,7 @@ INDICES = ['NDRE', 'NDVI', 'MSI', 'SWIR_ratio', 'REIP_approx', 'CRI']
 
 LABEL_NAMES = {0: 'Healthy', 1: 'Early Stress', 2: 'Active Disease'}
 
-# Simulator profile name -> class label (ground truth for simulated streams).
+# Stream profile name -> class label (ground truth carried by replayed real sequences).
 PROFILE_LABELS = {'healthy': 0, 'early_stress': 1, 'active_disease': 2}
 NUM_CLASSES = len(LABEL_NAMES)
 
@@ -45,5 +45,5 @@ def expected_risk(probabilities) -> np.ndarray | float:
 
 
 def zone_key(lat: float, lon: float) -> tuple[int, int]:
-    """~0.1 degree spatial zone, matching the generator's field zones."""
+    """~0.1 degree spatial zone (grouping for spatial cross-validation)."""
     return int(round(lat * 10)), int(round(lon * 10))

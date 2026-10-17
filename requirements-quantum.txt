@@ -1,4 +1,0 @@
-# Optional: QAOA on a statevector simulator (python run_pipeline.py --use-qaoa)
-qiskit>=1.0,<3
-qiskit-optimization>=0.6,<1
-qiskit-algorithms>=0.3,<1

@@ -1,9 +1,10 @@
 """
 Data Preprocessing Pipeline
 ============================
-load -> compute indices -> split by sample -> fit scaler on TRAIN rows only
--> build temporal sequences (LSTM / CNN-LSTM) and aggregated features
-(RF / XGBoost) from the same sample-id splits -> save.
+load -> compute indices (+ acquisition context: day of year, lat, lon)
+-> split by sample -> fit scaler on TRAIN rows only -> build temporal
+sequences (LSTM / CNN-LSTM) and aggregated features (RF / XGBoost) from the
+same sample-id splits -> save.
 
 Every sample is split exactly once by `sample_id`, so the temporal and
 aggregated datasets always share identical train/val/test membership.
@@ -16,9 +17,10 @@ import os
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedGroupKFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 
+from src.features.context import CONTEXT_FEATURES, add_context_columns
 from src.features.spectral_indices import compute_indices, get_feature_columns
 
 logger = logging.getLogger(__name__)
@@ -100,14 +102,17 @@ def create_sequences(
     return X, np.array(y_list, dtype=np.int64), np.array(id_list)
 
 
-def aggregate_feature_names(feature_cols: list[str] | None = None) -> list[str]:
+def aggregate_feature_names(feature_cols: list[str] | None = None,
+                            n_context: int = 0) -> list[str]:
     """Names of the aggregated features, matching create_aggregated_features."""
     if feature_cols is None:
         feature_cols = get_feature_columns()
-    return [f'{c}_{stat}' for stat in AGG_STATS for c in feature_cols]
+    spectral = feature_cols[:len(feature_cols) - n_context]
+    context = feature_cols[len(feature_cols) - n_context:]
+    return [f'{c}_{stat}' for stat in AGG_STATS for c in spectral] + list(context)
 
 
-def create_aggregated_features(X_seq: np.ndarray) -> np.ndarray:
+def create_aggregated_features(X_seq: np.ndarray, n_context: int = 0) -> np.ndarray:
     """
     Summarize each sequence into a flat vector for classical ML.
 
@@ -120,12 +125,19 @@ def create_aggregated_features(X_seq: np.ndarray) -> np.ndarray:
     Parameters
     ----------
     X_seq : (n_samples, seq_len, n_features)
+    n_context : int
+        The last `n_context` features are acquisition context (day of year,
+        location). They are not summarised: only their value at the last
+        timestep is kept, since a std or slope of latitude is meaningless.
 
     Returns
     -------
-    (n_samples, n_features * 4), columns ordered as aggregate_feature_names().
+    (n_samples, n_spectral * 4 + n_context), columns ordered as
+    aggregate_feature_names().
     """
     X_seq = np.asarray(X_seq, dtype=np.float64)
+    context = X_seq[:, -1, X_seq.shape[2] - n_context:]
+    X_seq = X_seq[:, :, :X_seq.shape[2] - n_context]
     n, seq_len, _ = X_seq.shape
     t = np.arange(seq_len, dtype=np.float64)
     t_centered = t - t.mean()
@@ -137,14 +149,25 @@ def create_aggregated_features(X_seq: np.ndarray) -> np.ndarray:
     w = min(DELTA_WINDOW, seq_len)
     delta = X_seq[:, -w:].mean(axis=1) - X_seq[:, :w].mean(axis=1)
 
-    return np.concatenate([mean, std, slope, delta], axis=1).astype(np.float32)
+    return np.concatenate([mean, std, slope, delta, context], axis=1).astype(np.float32)
+
+
+def _group_holdout(labels: np.ndarray, groups: np.ndarray, size: float,
+                   seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """Indices (keep, holdout): about `size` of the rows, whole groups only, label-stratified."""
+    n_splits = max(2, int(round(1 / size)))
+    splitter = StratifiedGroupKFold(n_splits=min(n_splits, len(np.unique(groups))),
+                                    shuffle=True, random_state=seed)
+    keep, hold = next(splitter.split(np.zeros(len(labels)), labels, groups))
+    return keep, hold
 
 
 def split_sample_ids(
     sample_table: pd.DataFrame,
     val_size: float = 0.15,
     test_size: float = 0.15,
-    seed: int = 42
+    seed: int = 42,
+    group_col: str | None = None
 ) -> dict[str, np.ndarray]:
     """
     Stratified split of sample ids into train / val / test.
@@ -152,10 +175,18 @@ def split_sample_ids(
     Parameters
     ----------
     sample_table : DataFrame with one row per sample and columns
-        `sample_id`, `label`.
+        `sample_id`, `label` (and `group_col` if given).
+    group_col : if given, every group (e.g. a field site whose overlapping
+        sequences are near-duplicates) is kept within one split.
     """
     ids = sample_table['sample_id'].to_numpy()
     labels = sample_table['label'].to_numpy()
+
+    if group_col is not None:
+        groups = sample_table[group_col].to_numpy()
+        keep, test = _group_holdout(labels, groups, test_size, seed)
+        train, val = _group_holdout(labels[keep], groups[keep], val_size / (1 - test_size), seed)
+        return {'train': ids[keep][train], 'val': ids[keep][val], 'test': ids[test]}
 
     ids_temp, ids_test, y_temp, _ = train_test_split(
         ids, labels, test_size=test_size, stratify=labels, random_state=seed
@@ -168,15 +199,22 @@ def split_sample_ids(
 
 
 def run_preprocessing_pipeline(
-    input_csv: str = 'data/raw/spectral_dataset.csv',
+    input_csv: str = 'data/real/cdm_s2/cdm_s2_sequences.csv',
     output_dir: str = 'data/processed',
     seq_len: int = 30,
     seed: int = 42,
     val_size: float = 0.15,
-    test_size: float = 0.15
+    test_size: float = 0.15,
+    group_col: str | None = None,
+    context: bool = True
 ) -> dict[str, np.ndarray]:
     """
     Full preprocessing pipeline. See module docstring for the steps.
+
+    `group_col` (a column of the input CSV, constant per sample) keeps whole
+    groups in one split; see split_sample_ids. `context` appends the
+    acquisition context channels (src.features.context; needs a `date`
+    column) after the spectral features.
 
     Saves to `output_dir`:
         X_{split}.npy, y_{split}.npy, ids_{split}.npy          (sequences)
@@ -196,13 +234,19 @@ def run_preprocessing_pipeline(
     logger.info("Computing vegetation indices")
     df = compute_indices(df, inplace=True)
     feature_cols = get_feature_columns()
+    n_context = 0
+    if context:
+        df = add_context_columns(df)
+        feature_cols = feature_cols + CONTEXT_FEATURES
+        n_context = len(CONTEXT_FEATURES)
 
-    sample_table = (
-        df.groupby('sample_id', sort=True)
-          .agg(label=('label', 'first'), lat=('lat', 'first'), lon=('lon', 'first'))
-          .reset_index()
-    )
-    split_ids = split_sample_ids(sample_table, val_size, test_size, seed)
+    # lat / lon are optional (lab data has no field coordinates)
+    aggs = {'label': ('label', 'first'),
+            **{c: (c, 'first') for c in ('lat', 'lon') if c in df.columns}}
+    if group_col is not None:
+        aggs[group_col] = (group_col, 'first')
+    sample_table = df.groupby('sample_id', sort=True).agg(**aggs).reset_index()
+    split_ids = split_sample_ids(sample_table, val_size, test_size, seed, group_col=group_col)
 
     # Fit the scaler on training rows only -- val/test statistics must not
     # leak into the normalization the model is trained with.
@@ -215,10 +259,10 @@ def run_preprocessing_pipeline(
     for split, ids in split_ids.items():
         X, y, kept_ids = create_sequences(df_norm, seq_len, feature_cols, sample_ids=ids)
         out[f'X_{split}'], out[f'y_{split}'], out[f'ids_{split}'] = X, y, kept_ids
-        out[f'X_{split}_agg'] = create_aggregated_features(X)
+        out[f'X_{split}_agg'] = create_aggregated_features(X, n_context)
         out[f'y_{split}_agg'], out[f'ids_{split}_agg'] = y, kept_ids
         split_col.loc[kept_ids] = split
-    agg_names = aggregate_feature_names(feature_cols)
+    agg_names = aggregate_feature_names(feature_cols, n_context)
 
     os.makedirs(output_dir, exist_ok=True)
     logger.info("Saving processed data to %s/", output_dir)
@@ -255,15 +299,20 @@ def main():
     """CLI entrypoint for preprocessing pipeline."""
     logging.basicConfig(level=logging.INFO, format='%(levelname)s | %(message)s')
     parser = argparse.ArgumentParser(description='Preprocess spectral dataset')
-    parser.add_argument('--input', type=str, default='data/raw/spectral_dataset.csv')
+    parser.add_argument('--input', type=str, default='data/real/cdm_s2/cdm_s2_sequences.csv')
     parser.add_argument('--output', type=str, default='data/processed')
-    parser.add_argument('--seq-len', type=int, default=30)
+    parser.add_argument('--seq-len', type=int, default=5)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--group-col', type=str, default='site_id',
+                        help="keep each group in one split ('' to split by sample)")
+    parser.add_argument('--no-context', action='store_true',
+                        help='spectral features only (no day-of-year / location channels)')
     args = parser.parse_args()
 
     run_preprocessing_pipeline(
         input_csv=args.input, output_dir=args.output,
-        seq_len=args.seq_len, seed=args.seed
+        seq_len=args.seq_len, seed=args.seed, group_col=args.group_col or None,
+        context=not args.no_context
     )
 
 
