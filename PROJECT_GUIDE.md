@@ -567,7 +567,7 @@ nothing is significant, and variety and site are partly confounded with the labe
 
 This is a positive control for the Sentinel-2 extraction. Run on 120 fields
 and 6 crops, Sep–Nov 2020: 46% of acquisitions pass QC, and crop type is
-predicted with balanced accuracy **0.31–0.33 vs 0.17 chance** on spatially
+predicted with balanced accuracy **0.59–0.62 vs 0.17 chance** on spatially
 held-out folds. The extraction carries real signal, but six similar crops
 are hard to separate at 20 m.
 

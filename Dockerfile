@@ -1,12 +1,19 @@
+# syntax=docker/dockerfile:1
 # Runtime image for the API, MQTT bridge and simulator (see docker-compose.yml).
 FROM python:3.12-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+# Slow or unstable connections can cut the ~200 MB torch wheel short, which
+# pip reports as a hash mismatch: wait longer, retry, and resume downloads.
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    PIP_DEFAULT_TIMEOUT=120 PIP_RETRIES=10 PIP_RESUME_RETRIES=10
 WORKDIR /app
 
 # CPU-only torch keeps the image small; use the CUDA index for GPU hosts.
+# The cache mount keeps downloaded wheels between builds, outside the image.
 COPY requirements.txt .
-RUN pip install --index-url https://download.pytorch.org/whl/cpu torch \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip \
+ && pip install --index-url https://download.pytorch.org/whl/cpu torch \
  && pip install -r requirements.txt
 
 COPY src/ src/
