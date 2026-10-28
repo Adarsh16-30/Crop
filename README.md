@@ -1,507 +1,417 @@
-# Crop Disease Detection from Multispectral Time Series
+# Crop Disease Early Warning from Multispectral Time Series
 
-A research prototype that classifies crop health (**Healthy / Early Stress /
-Active Disease**) from time series of Red-Edge, NIR and SWIR reflectance.
-It is trained on real data: cucurbit downy mildew (CDM) outbreak reports
-paired with Sentinel-2 L2A time series. It compares classical models, an
-LSTM, a CNN-LSTM and a **CNN-LSTM with temporal attention**, adds
-quantum-inspired feature selection and geo-spatial risk maps, and serves
-predictions through a live MQTT → InfluxDB → Grafana dashboard that replays
-real held-out sequences.
+Classifies crop health as **Healthy**, **Early Stress** or **Active Disease**
+from time series of red-edge, near-infrared and short-wave-infrared
+reflectance. It is trained on real data: cucurbit downy mildew (CDM) outbreak
+reports matched to Sentinel-2 satellite images. Predictions are served through a REST API and a live
+MQTT → InfluxDB → Grafana dashboard.
 
-> **Limitations — read first.**
+The project compares Random Forest, XGBoost, LSTM, CNN-LSTM and a
+**CNN-LSTM with temporal attention**, adds **quantum-inspired QUBO feature
+selection**, builds geo-spatial **risk maps**, and tests the approach on three
+more real datasets (vineyard UAV imagery, Ethiopian crop types, and a lab
+hyperspectral wheat-disease trial).
+
+For a full explanation of every part, with diagrams, read
+**[PROJECT_GUIDE.md](PROJECT_GUIDE.md)**.
+
+> **Limitations — read first**
 > - **The labels are weak and follow the calendar.** CDM reports only say
->   *when and where* an outbreak was reported. Labels are defined relative
->   to that date (see [Data](#data)). Every model therefore gets the
->   acquisition **date and location** as inputs, and most of what it
->   predicts comes from them: spectra alone reach CV macro-F1 0.38, date
->   and location alone 0.62, both together 0.61 (see the
->   [ablation](#where-the-signal-comes-from)). **These models do not show
->   that Sentinel-2 at 20 m detects CDM on its own.**
-> - **The dataset is small.** 521 sequences from 49 sites; the test split
->   is 83 sequences from 7 held-out sites, so test metrics have wide
->   intervals. The site-grouped cross-validation scores are the more
->   reliable comparison.
-> - **"Quantum" means quantum-inspired.** Feature selection is a QUBO solved
->   by classical simulated annealing on a CPU. QAOA (`--use-qaoa`) runs on a
->   statevector simulator for the top-8-feature sub-problem only, and is
->   checked against the exact brute-force optimum. No quantum hardware is
->   used.
+>   *when and where* an outbreak was reported, so the classes are defined by
+>   time relative to that date. Date and location alone reach CV macro-F1
+>   0.62; spectra alone reach 0.38; both together reach 0.61. **The models do not
+>   show that Sentinel-2 detects downy mildew on its own.**
+> - **The dataset is small:** 521 sequences from 49 sites. Use the
+>   site-grouped CV scores; the 83-sequence test split has wide intervals.
+> - **"Quantum" means quantum-inspired:** the QUBO is solved by simulated
+>   annealing on a CPU. Optional QAOA runs on a simulator. No quantum hardware is used.
 
-## Architecture
+---
 
+## Contents
+
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Getting started](#getting-started)
+- [Using the API](#using-the-api)
+- [Dashboards](#dashboards)
+- [Data](#data)
+- [Results](#results)
+- [Testing](#testing)
+- [Project structure](#project-structure)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Features
+
+| Area | What you get |
+|---|---|
+| **Real data** | CDM outbreak reports + Sentinel-2 L2A time series (anonymous Earth Search COGs or CDSE), cloud masking and pixel-purity QC |
+| **Models** | Random Forest, XGBoost, LSTM, CNN-LSTM, CNN-LSTM-Attention (attention weights per prediction) |
+| **No overfitting by design** | Site-grouped split and CV, one-standard-error model selection, early stopping on an inner hold-out, train-vs-CV gap reported for every configuration |
+| **Honest evaluation** | 95% bootstrap CIs, McNemar tests, context-only and spectral-only ablations, spatial-zone CV |
+| **Quantum-inspired** | QUBO feature selection (simulated annealing, optional QAOA) compared with top-K, mRMR, random-K and all features |
+| **Calibrated output** | Temperature-scaled probabilities, a probability-weighted risk score, low-confidence and out-of-distribution flags |
+| **Maps** | Folium risk heatmaps and a metric zone grid exported as GeoJSON |
+| **Live system** | TLS-encrypted MQTT replay of held-out sites → bridge → InfluxDB → 4 Grafana dashboards with 3 alert rules |
+| **API** | FastAPI with API keys, rate limiting, body/batch caps, Prometheus metrics |
+| **Side experiments** | Vineyard UAV (MicaSense), EthCT2020 crop types, Septoria lab hyperspectral (VNIR + SWIR) |
+| **Quality** | 221 tests on real data fixtures, ruff, CI, dashboards defined as code |
+
+---
+
+## How it works
+
+### System overview
+
+```mermaid
+flowchart LR
+    subgraph SRC["1 · Real data"]
+        CDM["CDM outbreak reports<br/>(date + GPS)"]
+        S2["Sentinel-2 L2A<br/>6 bands, 20 m"]
+    end
+    subgraph OFF["2 · Offline research pipeline"]
+        BUILD["src.real_data<br/>QC + weak labels<br/>→ 5-step sequences"]
+        PIPE["run_pipeline.py<br/>tune · train · evaluate<br/>QUBO · risk maps"]
+    end
+    subgraph ART["3 · Artifacts"]
+        CK["models/checkpoints<br/>(model + scaler + temperature)"]
+        REP["reports/<br/>metrics, CIs, maps"]
+    end
+    subgraph LIVE["4 · Live system (Docker)"]
+        PUB["Replay publisher<br/>held-out sites"]
+        MQ["Mosquitto<br/>MQTT over TLS"]
+        BR["Bridge<br/>assemble + predict"]
+        DB[("InfluxDB")]
+        GF["Grafana<br/>4 dashboards"]
+        API["FastAPI<br/>/predict"]
+    end
+    CDM --> BUILD
+    S2 --> BUILD
+    BUILD --> PIPE
+    PIPE --> CK
+    PIPE --> REP
+    PUB --> MQ --> BR --> DB --> GF
+    CK --> BR
+    CK --> API
+    REP -- publish_pipeline_metrics --> DB
 ```
-CDM reports (Bugwood API) ─► Sentinel-2 L2A around each report (STAC/COG, 20 m)
-        │                            │  SCL cloud mask + pixel-purity QC
-        └────────► time-relative weak labels ─► sequences (5 acquisitions)
-                                             │
-preprocessing (site-grouped split → scaler fit on train only)
-   │
-   │   per step: 6 bands + 6 indices + date & location context
-   ├─► RF / XGBoost  (mean, std, slope, delta per feature)  ┐
-   ├─► LSTM / CNN-LSTM / CNN-LSTM-Attention                 ├ tuned by site-grouped CV
-   ├─► ablations: context-only RF, spectral-only RF         ┘
-   ├─► QUBO feature selection vs. top-K / mRMR / random-K
-   └─► best model (by CV) ─► risk maps (Folium, metric grid)
 
-replay of held-out sequences ─MQTT─► bridge ─► src.inference ─► InfluxDB ─► Grafana
-REST client ─────────────────────────► FastAPI ─► src.inference (same code path)
+### From outbreak reports to labelled sequences
+
+Each CDM report gives a date and a location. For every report, the
+Sentinel-2 images around that location are fetched and cloud-checked. A
+sequence of 5 clean images is then labelled by **when it ends relative to
+the report**:
+
+```mermaid
+flowchart LR
+    A["ends > 21 days<br/>before the report"] -->|label 0| H["Healthy"]
+    B["ends 21–0 days<br/>before the report"] -->|label 1| E["Early Stress"]
+    C["ends 0–45 days<br/>after the report"] -->|label 2| D["Active Disease"]
 ```
 
-Training, the API and the MQTT bridge all go through one inference path
-(`src/inference/`). It computes the vegetation indices and the context
-channels, applies the scaler saved inside the checkpoint, and applies the
-calibrated model.
+Every acquisition gives **16 features**: 6 bands, 6 vegetation indices (NDRE,
+NDVI, MSI, SWIR ratio, REIP, CRI), and 4 context channels (day of year as
+sin/cos, latitude, longitude). The deep models read the 5 × 16 sequence. The
+tree models read 52 summary features: the mean, std, slope and change of
+each spectral feature, plus the context.
 
-## Quick start
+### Training and evaluation (`run_pipeline.py`)
 
-Requires Python 3.12+ (tested on 3.14). Docker is needed only for the live
-dashboard. Everything — pipeline, real-data tools, QAOA, tests and linting
-— installs from one file:
+```mermaid
+flowchart TD
+    P1["Phase 1 · Preprocess<br/>split by SITE (70/15/15)<br/>scaler fit on train only"]
+    P2["Phase 2 · RF + XGBoost<br/>site-grouped CV tuning<br/>context-only / spectral-only ablations"]
+    P3["Phase 3 · LSTM, CNN-LSTM,<br/>CNN-LSTM-Attention<br/>CV tuning · refit · calibration"]
+    P4["Phase 4 · QUBO feature selection<br/>vs top-K, mRMR, random-K"]
+    CMP["Compare on held-out test sites<br/>95% bootstrap CIs + McNemar"]
+    P5["Phase 5 · Risk maps<br/>best model by CV"]
+    P6["Phase 6 · Publish to InfluxDB<br/>(skip with --skip-mqtt)"]
+    P1 --> P2 & P3 & P4
+    P2 & P3 & P4 --> CMP --> P5 --> P6
+```
+
+### One inference path
+
+Training, the API, the bridge and the history backfill all call the same
+code in `src/inference/`, and a test checks that they agree:
+
+```mermaid
+flowchart LR
+    R["raw bands (5 × 6)<br/>+ dates + lat/lon"] --> I["vegetation indices"]
+    I --> C["context channels"]
+    C --> S["scaler saved<br/>in the checkpoint"]
+    S --> M["model"]
+    M --> T["temperature<br/>calibration"]
+    T --> O["label · probabilities ·<br/>risk = Σ pᵢ·wᵢ · status"]
+```
+
+---
+
+## Getting started
+
+### Prerequisites
+
+| Tool | Why | Notes |
+|---|---|---|
+| Python 3.12+ | Everything | Tested on 3.14 |
+| Git | Get the code | |
+| Docker Desktop (Compose v2) | Live dashboard and API | Not needed for training only |
+| `bash` + `openssl` | MQTT TLS certificates | On Windows, Git Bash has both |
+| Internet | Building the dataset | No account needed (Earth Search) |
+
+### 1. Install
 
 ```bash
+git clone <your-repo-url> Crop
+cd Crop
 python -m venv venv
-venv\Scripts\activate            # Windows  (source venv/bin/activate on Linux/macOS)
+venv\Scripts\activate            # Windows   (Linux/macOS: source venv/bin/activate)
 pip install -r requirements.txt
 ```
 
-### 1. Build the dataset
+### 2. Build the dataset (~1 hour, resumable)
 
 ```bash
-python -m src.real_data cdm                 # CDM reports -> data/real/cdm/
-python -m src.real_data s2-cdm              # Sentinel-2 around each event (~1 h, resumable)
-python -m src.real_data temporal            # labelled sequences -> data/real/cdm_s2/
+python -m src.real_data cdm         # CDM outbreak reports      -> data/real/cdm/
+python -m src.real_data s2-cdm      # Sentinel-2 around reports -> data/real/s2/
+python -m src.real_data temporal    # labelled sequences        -> data/real/cdm_s2/
 ```
 
-Sentinel-2 is read from the public Earth Search COGs (no account). The
-CDSE Statistical API is an alternative (`--backend cdse`, needs
-`CDSE_CLIENT_ID` / `CDSE_CLIENT_SECRET` in `.env`).
-
-### 2. Train and evaluate
+### 3. Train and evaluate (15–45 minutes on a laptop CPU)
 
 ```bash
-python run_pipeline.py --skip-mqtt          # 15-45 min on a laptop CPU, mostly tuning
-python run_pipeline.py --no-tune --skip-mqtt   # fixed hyperparameters, a few minutes
+python run_pipeline.py --skip-mqtt
 ```
 
-Main flags: `--models lstm cnn_lstm cnn_lstm_attention`, `--cv-folds 5`,
-`--epochs 80`, `--patience 12`, `--max-features 8`, `--use-qaoa`,
-`--grid-size-m 50000`, `--skip-quantum`, `--skip-geo`, `--seed`, and
-`--no-context` (spectral features only). With
-`--no-tune`, `--hidden-dim`, `--dropout`, `--weight-decay` and
-`--noise-std` set the deep models directly.
+This writes the trained models to `models/checkpoints/`, the metrics, plots and maps
+to `reports/`, and the split arrays and predictions to `data/processed/`. For a
+quick run with fixed hyperparameters, use `--no-tune` (a few minutes).
 
-| Output | Contents |
+### 4. Start the live system
+
+```bash
+cp .env.example .env                 # then replace every "change-me" value
+bash scripts/gen_mqtt_certs.sh       # local CA + broker certificate in certs/mqtt/
+docker compose up -d                 # InfluxDB, Grafana, Mosquitto
+python -m src.dashboard.influxdb_setup --create-tokens
+#   -> copy INFLUX_WRITE_TOKEN and INFLUX_READ_TOKEN into .env
+docker compose up -d                 # reload Grafana with the read-only token
+docker compose --profile app up -d --build   # API, bridge, replay publisher
+```
+
+### 5. Fill the dashboards
+
+```bash
+python -m src.dashboard.seed_history --hours 12      # 12 h of history, same code path as live
+python -m src.dashboard.publish_pipeline_metrics     # offline results from reports/
+```
+
+Open **http://localhost:3000**. Log in with `GRAFANA_ADMIN_USER` /
+`GRAFANA_ADMIN_PASSWORD` from `.env`; the dashboards are in the
+**Crop Disease** folder. The API docs are at **http://localhost:8000/docs**.
+
+### 6. Run the tests
+
+```bash
+pytest -m "not slow"     # fast suite, ~3 min
+pytest -m slow           # end-to-end pipeline, ~2 min
+ruff check .
+```
+
+### Optional: side experiments
+
+Their results are already in `reports/`; rerun only to reproduce them.
+
+```bash
+python -m src.real_data vineyard-fetch && python -m src.real_data vineyard
+python -m src.real_data ethct --zip-path "Ethiopian Crop Type 2020 (EthCT2020) dataset.zip" --n-fields 120
+python -m src.real_data septoria-fetch --sensors SWIR VNIR   # slow server; rerun to resume
+python -m src.real_data septoria --sensors VNIR SWIR
+```
+
+### Stopping
+
+```bash
+docker compose --profile app down     # stop everything, keep the data
+```
+
+---
+
+## Using the API
+
+Send **raw reflectances**: exactly 5 rows of 6 bands in [0, 1], in the order
+`red_edge_705, red_edge_740, red_edge_783, nir_842, swir_1610, swir_2190`,
+plus the **date of every row** and the **field location**. Authenticate with
+one of the `API_KEYS` from `.env`.
+
+```bash
+curl -X POST http://localhost:8000/predict \
+  -H "Content-Type: application/json" -H "X-API-Key: <your-api-key>" \
+  -d '{"readings": [[0.08,0.13,0.15,0.18,0.20,0.11],[0.08,0.13,0.15,0.18,0.20,0.11],
+                    [0.08,0.13,0.15,0.18,0.20,0.11],[0.08,0.13,0.15,0.18,0.20,0.11],
+                    [0.08,0.13,0.15,0.18,0.20,0.11]],
+       "dates": ["2023-06-01","2023-06-06","2023-06-11","2023-06-16","2023-06-21"],
+       "lat": 39.59, "lon": -74.69}'
+```
+
+On Windows PowerShell, use `curl.exe` or the interactive page at `/docs`.
+
+```json
+{"predicted_label": 0, "label_name": "Healthy", "confidence": 0.93,
+ "risk_score": 0.05, "probabilities": [0.93, 0.04, 0.03], "status": "ok",
+ "out_of_distribution": false, "model_type": "cnn_lstm_attention",
+ "inference_time_ms": 3.1}
+```
+
+The response values above are illustrative.
+
+| Endpoint | Purpose |
 |---|---|
-| `data/processed/` | Split arrays, `scaler_params.json` (train-only fit), `sample_meta.csv`, `predictions.csv` |
-| `models/checkpoints/*.pt` | Self-describing checkpoints: weights, architecture, scaler, temperature, CV score. Load with `weights_only=True`. |
-| `reports/hyperparameter_tuning.csv` | Every configuration tried: CV macro-F1 (mean, SE), train macro-F1, train-vs-CV gap, chosen flag |
-| `reports/model_comparison.csv` | Test metrics with 95% bootstrap CIs |
-| `reports/model_significance.csv` | Pairwise McNemar tests |
-| `reports/classical_cv.csv` | Site-grouped and spatial-zone CV |
-| `reports/ablation_cv.csv` | Site-grouped CV of the context-only and spectral-only RFs |
-| `reports/feature_selection_comparison.csv` | QUBO vs. top-K, mRMR and random-K (site-grouped CV) |
-| `reports/disease_risk_map.html`, `zone_risk_map.html` | Interactive maps |
+| `POST /predict` | One sequence |
+| `POST /predict/batch` | Many sequences (`sequences`, one `dates` list and one `lat`/`lon` each) |
+| `GET /info` | Model type, `seq_len`, `requires_context`, training metrics |
+| `GET /health` | 200 when a model is loaded, otherwise 503 |
+| `GET /metrics` | Prometheus metrics |
 
-### 3. Side experiments
+`risk_score` = Σ pᵢ·wᵢ with w = (0, 0.5, 1). `status` is `ok`,
+`low_confidence`, or `out_of_distribution`; the last means some standardized
+feature has |z| > 8.
 
-```bash
-python -m src.real_data ethct --zip-path "path/to/Ethiopian Crop Type 2020 (EthCT2020) dataset.zip"
-python -m src.real_data vineyard-fetch      # raw TIFFs, bands 1-5 (~2.7 GB of the 4.8 GB ZIP)
-python -m src.real_data vineyard            # calibrate -> features -> leave-session-out CV
-python -m src.real_data schema              # sensor-independent feature table
-```
+---
+
+## Dashboards
+
+The replay publisher streams **real held-out Sentinel-2 sequences**, one CDM
+site per station, over MQTT. Each payload carries its true label, so the
+live agreement shown in the dashboards is a real held-out score.
+
+| Dashboard | Shows |
+|---|---|
+| **Field Overview** | KPIs, station risk map, latest prediction per station, risk over time, class timeline, prediction mix |
+| **Spectral Analysis** | Band reflectance, six vegetation indices over time, NDVI heatmap and distribution by label |
+| **Model Performance** | Live agreement and confusion matrix, confidence, OOD count; offline model comparison with CIs, McNemar tests, training curves, CV, QUBO comparison, batch risk map |
+| **System Health** | Data freshness, ingest rate, station heartbeat, bridge throughput and errors |
+
+**Alerts:** high risk at a station (risk above 0.7), no data for 5 minutes, and bridge errors.
+**Security:** secrets come only from `.env`. MQTT is TLS-only with
+username, password and an ACL. InfluxDB uses a write-only token for the
+bridge and a read-only one for Grafana. All ports are bound to `127.0.0.1`.
+
+---
 
 ## Data
 
 | Dataset | Source | Role |
 |---|---|---|
-| CDM reports | ipmPIPE / Bugwood public API | Outbreak dates + GPS that anchor the satellite time series |
-| Sentinel-2 L2A | Copernicus archive via Earth Search COGs, or CDSE | B05/B06/B07/B08/B11/B12 = the six project bands, on a 20 m grid |
-| EthCT2020 (Mendeley) | 2,793 crop-type field polygons, Ethiopia 2020 (local ZIP) | Spatial-quality check of the Sentinel-2 extraction |
-| Vineyard (Zenodo 14936376) | MicaSense RedEdge-P UAV imagery, FD / Esca labels per session | Single-date UAV classification |
+| CDM outbreak reports | ipmPIPE / Bugwood public API | When and where each outbreak was reported |
+| Sentinel-2 L2A | Earth Search COGs (or CDSE) | B05/B06/B07/B08/B11/B12 = the six project bands, 20 m |
+| EthCT2020 | Mendeley Data, 2,793 field polygons in Ethiopia | Positive control for the Sentinel-2 extraction |
+| Vineyard | Zenodo 14936376, MicaSense RedEdge-P UAV | Single-date healthy vs diseased vines |
+| Septoria | INRAE doi:10.57745/WVP0FJ, HySpex VNIR + SWIR | Lab test of pre-symptomatic detection on wheat leaves |
 
-**Sentinel-2 QC.** Every acquisition is reduced to a 3×3 block of 20 m
-pixels (B08 block-averaged from 10 m). Pixels must have scene class
-vegetation or bare soil and reflectance in (0, 1]. An acquisition passes if
-≥ 67% of the block and its centre pixel are valid, ≥ 50% of valid pixels are
-vegetation, and the NIR coefficient of variation is ≤ 0.25. Failures are
-kept, with `qc_reason` saying why (`reports/event_qc_summary.csv`).
+**Sentinel-2 QC.** Each acquisition is a 3×3 block of 20 m pixels. It passes
+if most pixels are valid, at least half are vegetation, and the NIR is
+homogeneous. Of 2,566 acquisitions for 86 events, 761 pass.
 
-Of 2,566 acquisitions for 86 events, 761 pass QC. Rejections: 902 cloud or
-no data, 706 not vegetated, 104 too cloudy, 89 heterogeneous.
+**Result:** 521 sequences of 5 acquisitions from 49 sites. Splits and CV always
+hold out whole sites.
 
-**Labels.** The public API returns GPS for only 87 usable events (2021
-onward) and no host, incidence or severity (`python -m src.real_data cdm
---extra-csv export.csv` merges them from an export if you have one). All
-reports are positives, so each site is its own control. A sequence ending:
-
-| Class | Label | Sequence ends |
-|---|---|---|
-| 0 | Healthy | more than 21 days before the report |
-| 1 | Early Stress | 21–0 days before the report |
-| 2 | Active Disease | 0–45 days after the report |
-
-That gives 521 sequences of 5 acquisitions from 49 sites. Splits and CV
-always hold out whole sites, so no site is ever in two splits.
-
-**Features.** Per acquisition: the 6 bands, 6 vegetation indices (NDRE,
-NDVI, MSI, SWIR ratio, REIP, CRI) and 4 **context channels**
-(`src/features/context.py`): day of year as sine and cosine, latitude and
-longitude. Every real reading has a date and a location, so these are
-legitimate inputs at prediction time. The classical models get the mean,
-std, slope and delta of each spectral feature over the sequence, plus the
-context at its last acquisition (52 features).
-
-## Training without overfitting
-
-Hundreds of overlapping sequences from a few dozen sites are easy to
-memorise, so model selection is built around that (`src/training/tuning.py`):
-
-- **Site-grouped 5-fold CV on train+val** scores every configuration. The
-  test split is not used for any choice.
-- **One-standard-error rule.** Among configurations within one standard
-  error of the best CV score, the simplest is chosen (fewest parameters,
-  shallowest trees, strongest regularization).
-- **Regularization-leaning grids.** RF: depth 2–8, min leaf 5–30, features
-  per split sqrt / 50% / all.
-  XGBoost: depth 1–3, min child weight 5–20, L2 1–10. Deep models: hidden
-  size 8–32, dropout 0.3–0.5, weight decay 0.01–0.1, Gaussian input noise
-  0.1–0.3.
-- **The train-vs-CV gap is reported** for every configuration.
-- **Early stopping on an inner site hold-out** inside each training fold,
-  never on the fold being scored.
-- **Final deep models are refit on all of train+val** for the median best
-  CV epoch, and temperature-calibrated on their out-of-fold logits rather
-  than on a small validation split. The fold models are less confident
-  than the refit model, so that temperature may soften the refit model but
-  never sharpen it (T ≥ 1). Sharpening made the CNN models overconfident
-  (mean confidence 0.90 at 72% accuracy); with T ≥ 1 they lean
-  under-confident, the safer side for the API's `low_confidence` flag.
-- The best deep model for the dashboard and API is picked by CV score, not
-  test score.
-
-### CNN-LSTM-Attention
-
-`src/models/cnn_lstm_model.py`: two 1-D convolution blocks extract local
-temporal patterns from the 16 per-step features (bands, indices and
-context), an
-LSTM models their order, and **additive temporal attention** weights the
-LSTM outputs into one context vector for the classifier. `forward(x,
-return_attention=True)` also returns the attention weights, so you can see
-which acquisitions drove a prediction. The plain CNN-LSTM is the same network using only the
-last LSTM step, which makes it the attention ablation.
+---
 
 ## Results
 
-Run: `python run_pipeline.py --skip-mqtt`, seed 42. Chosen configurations
-from site-grouped 5-fold CV (`reports/hyperparameter_tuning.csv`), with the
-previous spectral-only run for comparison:
+`python run_pipeline.py --skip-mqtt`, seed 42. Site-grouped 5-fold CV:
 
-| Model | Chosen configuration | CV macro-F1 | Before (spectral only) | Train − CV gap |
-|---|---|---|---|---|
-| Random Forest | depth 2, min leaf 30, 50% features | **0.609 ± 0.061** | 0.362 | 0.07 |
-| XGBoost | depth 1, lr 0.03, 50 trees, min child 20, λ 10 | **0.606 ± 0.045** | 0.394 | 0.07 |
-| LSTM | hidden 16, dropout 0.3, wd 0.1, noise 0.3 (5.6k params) | 0.542 ± 0.025 | 0.398 | 0.12 |
-| CNN-LSTM | hidden 16, dropout 0.5, wd 0.1, noise 0.3 (3.2k params) | 0.533 ± 0.046 | 0.411 | 0.11 |
-| **CNN-LSTM-Attention** | hidden 8, dropout 0.5, wd 0.1, noise 0.3 (1.4k params) | **0.553 ± 0.034** | 0.424 | 0.10 |
+| Model | CV macro-F1 | Train − CV gap |
+|---|---|---|
+| Random Forest | **0.609 ± 0.061** | 0.07 |
+| XGBoost | **0.606 ± 0.045** | 0.07 |
+| LSTM | 0.542 ± 0.025 | 0.12 |
+| CNN-LSTM | 0.533 ± 0.046 | 0.11 |
+| CNN-LSTM-Attention (served model) | 0.553 ± 0.034 | 0.10 |
 
-Chance macro-F1 is about 0.33. CV improved by 0.13–0.25 for every model,
-and the train-vs-CV gap shrank from 0.11–0.34 to 0.07–0.12, so the models
-fit *less* noise than before, not more. The tuned models are also smaller:
-tuning picked the shallowest trees and a 1.4k-parameter attention network.
-The CNN-LSTM-Attention has the best CV score of the deep models and is the
-one served by the API and the dashboard.
+Held-out test set (83 sequences, 7 sites, 95% bootstrap CIs):
 
-Held-out test set (83 sequences, 7 sites; 95% bootstrap CIs):
+| Model | Accuracy [95% CI] | Macro-F1 |
+|---|---|---|
+| Random Forest | 0.735 [0.639, 0.831] | 0.657 |
+| RF, 8 QUBO features | 0.735 [0.639, 0.831] | 0.659 |
+| XGBoost | 0.687 [0.578, 0.783] | 0.610 |
+| CNN-LSTM-Attention | 0.723 [0.626, 0.807] | 0.595 |
+| LSTM | 0.663 [0.554, 0.771] | 0.575 |
+| CNN-LSTM | 0.651 [0.554, 0.747] | 0.515 |
+| *Context-only RF (date, location)* | 0.651 [0.542, 0.759] | 0.522 |
+| *Spectral-only RF* | 0.506 [0.398, 0.614] | 0.402 |
 
-| Model | Accuracy [95% CI] | Macro-F1 | Before | Early-Stress F1 |
-|---|---|---|---|---|
-| Random Forest | 0.735 [0.639, 0.831] | **0.657** | 0.416 | 0.357 |
-| RF, 8 QUBO features | 0.735 [0.639, 0.831] | **0.659** | 0.425 | 0.385 |
-| XGBoost | 0.687 [0.578, 0.783] | 0.610 | 0.373 | 0.250 |
-| CNN-LSTM-Attention | 0.723 [0.626, 0.807] | 0.595 | 0.313 | 0.200 |
-| LSTM | 0.663 [0.554, 0.771] | 0.575 | 0.397 | 0.296 |
-| CNN-LSTM | 0.651 [0.554, 0.747] | 0.515 | 0.399 | 0.111 |
-| *Context-only RF (date, location)* | 0.651 [0.542, 0.759] | 0.522 | – | 0.091 |
-| *Spectral-only RF* | 0.506 [0.398, 0.614] | 0.402 | – | 0.121 |
+Chance macro-F1 is about 0.33. What the results show:
 
-### Where the signal comes from
+- **Most of the signal is date and location.** In CV, spectral only scores
+  0.38, context only 0.62, and both together 0.61.
+- **QUBO keeps 8 of 52 features at no loss.** It ties with top-K and mRMR,
+  and all three clearly beat random subsets.
+- **No overfitting:** the train-vs-CV gaps are 0.07–0.12.
 
-| Inputs (RF, site-grouped CV) | CV macro-F1 |
+**Side experiments**
+
+| Dataset | Result |
 |---|---|
-| Spectral only | 0.384 ± 0.079 |
-| Date + location only | 0.622 ± 0.100 |
-| Both (tuned RF) | 0.609 ± 0.122 |
-| Both, 8 QUBO-selected features | 0.618 ± 0.126 |
+| EthCT2020 (6 crops) | Balanced accuracy 0.31–0.33 vs 0.17 chance: the extraction carries signal |
+| Vineyard (28 sessions) | RF balanced accuracy 0.64, permutation p = 0.085: not significant |
+| Septoria, VNIR + SWIR | Best 3-state macro-F1 0.52; pre-symptomatic inoculated vs control AUC 0.56, p = 0.25: not significant |
 
-- **Most of the gain comes from date and location.** In CV, adding the
-  spectra to the context does not help. On the test sites it does: the
-  full RF beats the context-only RF (McNemar p = 0.016; 7 sequences only
-  the full RF gets right, 0 the other way). That is a hint of spectral
-  signal, from 7 sites, not proof.
-- **The gain is not memorised geography.** Holding out whole ~0.1° spatial
-  zones instead of sites gives the same scores (RF 0.612, XGBoost 0.610).
-  The QUBO selection drops latitude and longitude entirely and keeps the
-  two day-of-year channels plus six spectral features (SWIR-1610 and REIP
-  means, red-edge 705/740 variability, REIP slope, red-edge 740 change).
-  It matches all 52 features with 8.
-- **Every model is significantly better than spectral-only** (McNemar
-  p ≤ 0.036). The differences between the full models are not
-  significant.
-- **QUBO feature selection** (8 of 52 features, site-grouped CV):
+Details and caveats: [PROJECT_GUIDE.md §12](PROJECT_GUIDE.md#12-side-experiments).
 
-  | Selection method | CV macro-F1 | Test macro-F1 |
-  |---|---|---|
-  | QUBO (simulated annealing) | 0.618 ± 0.126 | 0.659 |
-  | Top-K by importance | 0.613 ± 0.120 | 0.657 |
-  | All 52 features | 0.609 ± 0.122 | 0.657 |
-  | mRMR | 0.608 ± 0.103 | 0.609 |
-  | Random K (mean of 10) | 0.383 ± 0.057 | 0.436 |
+---
 
-  The informed selectors are tied with each other and with all features;
-  all clearly beat random subsets, which usually miss the date channels.
+## Testing
 
-### Side experiments
+The 221 tests run on a committed snapshot of the real data
+(`tests/fixtures/`), so they need no network. They cover the features,
+split integrity, models, tuning, **train/serve parity**, the API, streaming,
+QUBO, geospatial output, the dashboards (every field a query reads is
+actually written), the real-data loaders, Septoria, and an end-to-end
+pipeline run (`-m slow`). CI runs ruff and the tests.
 
-**EthCT2020 (120 fields, 6 crops, Sep–Nov 2020)**, loaded from the local
-ZIP. 46% of in-season
-acquisitions pass QC, and every field has at least one usable acquisition.
-Among cloud-free acquisitions, 28% fail purity, nearly all as *not
-vegetated*. The NIR-homogeneity rule rarely fires (median CV 0.06–0.08), so
-the 0.25 threshold is lenient. Positive control: crop type predicted from
-in-season spectra with spatially held-out folds reaches balanced accuracy
-0.31–0.33 vs. 0.17 chance. That is above chance, so the extraction carries
-real signal, but six similar cereal/legume crops are hard at 20 m. The
-purity filter did not change it.
-
-**Vineyard (UAV).** The processed PNGs in the archive are 8-bit and
-contrast-stretched, so features are computed from the raw 16-bit TIFFs:
-DN → radiance (MicaSense radiometric calibration, 2-D vignetting, row
-gradient) → reflectance via the downwelling light sensor (DLS). Bands are
-aligned by ECC homography, and pixels are masked to vegetation (NDVI > 0.4).
-
-The calibration panel, found automatically, read 0.52–0.71 (site 1) and
-0.86–1.26 (site 2) with DLS alone, against a nominal ~0.5. So each site is
-corrected with its panel (`--panel-albedo`, default 0.5; use your panel's
-certified values if known). Corrected vine canopy reads red ≈ 0.02,
-red edge ≈ 0.17 and NIR ≈ 0.44.
-
-Labels exist per session only, all on one date, so CV is
-leave-one-session-out. Significance comes from permuting session labels.
-Zenodo throttled the download after 111 of ~170 captures. All 28 labelled
-sessions are covered, and rerunning `vineyard-fetch` resumes the rest.
-
-| Healthy vs. diseased (FD or Esca), 28 sessions | Balanced acc. (capture) | Balanced acc. (session) | ROC-AUC (session) | Permutation p |
-|---|---|---|---|---|
-| Random Forest | 0.627 | 0.638 | 0.612 | 0.085 |
-| Logistic Regression | 0.606 | 0.600 | 0.587 | 0.114 |
-| XGBoost | 0.575 | 0.550 | 0.613 | – |
-
-The direction is plausible: diseased sessions have lower red-edge
-chlorophyll indices (NDRE p10 0.29 vs. 0.34, CI-red-edge p10 0.82 vs. 1.05).
-But nothing is significant: the best permutation p is 0.085, and no single
-feature survives FDR correction (q ≥ 0.34). With 8 healthy sessions, and
-variety and site partly confounded with labels (`label_table_binary.csv`),
-this dataset cannot establish detection.
-
-## Septoria hyperspectral dataset (lab, in progress)
-
-[Data INRAE doi:10.57745/WVP0FJ](https://entrepot.recherche.data.gouv.fr/dataset.xhtml?persistentId=doi:10.57745/WVP0FJ):
-durum wheat leaves inoculated with *Zymoseptoria tritici* or with water
-(controls), imaged by a VNIR (411–993 nm) and a SWIR (964–2494 nm) HySpex
-camera on 18 dates from −1 to 20 days post inoculation (dpi). 611 GB in
-total, one ZIP per date and camera. `src/real_data/septoria.py` reads only
-the needed members out of the remote ZIPs and reduces each image to
-per-leaf spectra and features (`data/real/septoria/spectra/`).
-
-What was verified on the files (not assumed):
-- **Matching.** Archive contents match the annotation tables (1,174 of
-  1,175 images, 3,320 leaf observations present in both cameras). The leaf
-  numbering refers to the same physical leaf across dates (each leaf has an
-  ink mark visible in every preview).
-- **Calibration.** Cubes are dark-subtracted raw counts, not reflectance; a
-  white panel is scanned first in every image, so reflectance = leaf ÷
-  panel per band and column. Leaf masks are 1-based and mirrored in SWIR
-  but not in VNIR; the orientation is detected per image and the
-  extraction fails loudly if a mask does not land on a leaf.
-- **Symptom timing is not annotated.** `Data_description.csv` gives one
-  infection-confidence value per leaf from a visual assessment, not
-  per-date symptom status, so inoculation alone cannot define
-  "pre-symptomatic". Onset is derived per leaf from the imagery: the first
-  date (confirmed on the next) on which the leaf's chlorotic-pixel fraction
-  exceeds every same-day control leaf of its genotype. Controls are scored
-  the same way to measure the rule's false-positive rate. Control leaves
-  also yellow and dry from ~15 dpi (detached-leaf senescence), so late
-  dates are not disease-specific.
-
-Cohort: pots 37–48 (6 inoculated, 6 control, both genotypes), left side,
-dpi −1, 4, 7, 10, 12, 13, 14, 15.
-
-```bash
-python -m src.real_data septoria-fetch --sensors SWIR       # remote, resumable
-# VNIR archives downloaded by hand go to data/real/septoria/archives/VNIR/<date>.zip
-python -m src.real_data septoria-fetch --sensors VNIR --local-only
-python -m src.real_data septoria          # nested pot-grouped CV -> reports/septoria/
-```
-
-The server throttles each connection (0.03–0.25 MB/s), so the remote
-reader uses several parallel range requests and re-resolves expired
-download links.
-
-## Live dashboard
-
-```bash
-cp .env.example .env              # then replace every "change-me" value
-bash scripts/gen_mqtt_certs.sh    # local CA + broker TLS certificate (certs/mqtt/)
-docker compose up -d              # InfluxDB, Grafana, Mosquitto (bound to 127.0.0.1)
-python -m src.dashboard.influxdb_setup --create-tokens   # paste tokens into .env
-docker compose --profile app up -d                      # API, bridge, replay publisher
-```
-
-Or run the services directly:
-
-```bash
-python -m src.dashboard.mqtt_subscriber --model-path models/checkpoints/cnn_lstm_attention_best.pt
-python -m src.data.mqtt_publisher --interval 1          # replays held-out test sequences
-uvicorn src.api.main:app --port 8000
-```
-
-There is no simulator. The publisher **replays real Sentinel-2 sequences**
-from `data/real/cdm_s2/cdm_s2_sequences.csv` — by default the test split, so
-the live model never sees data it was trained on (`--split val|train|all`
-to change). Each station is a real CDM site, and each payload carries the
-sequence's weak label as ground truth, so the dashboard's live agreement is
-a genuine held-out score. The bridge predicts once per completed
-5-acquisition sequence.
-
-Grafana runs at http://localhost:3000. Four linked dashboards are
-provisioned in the **Crop Disease** folder:
-
-| Dashboard | Shows |
-|---|---|
-| **Field Overview** | KPIs, a station map colored by latest risk, latest prediction per station, risk over time, class timeline, prediction mix, class probabilities, active alerts |
-| **Spectral Analysis** | Band reflectance per station, six vegetation indices over time, an NDVI heatmap and distribution by label, latest indices per station |
-| **Model Performance** | Live agreement with the labels, live confusion matrix, confidence and out-of-distribution counts; per pipeline run: model metrics with CIs, McNemar tests, training curves, site vs spatial CV, QUBO vs baselines, the risk map, macro-F1 across runs |
-| **System Health** | Data freshness, ingest rate, station heartbeat, bridge throughput and errors |
-
-```bash
-# History through the same bridge code path (source=backfill)
-python -m src.dashboard.seed_history --hours 12
-python -m src.dashboard.seed_history --clear
-# Offline results (run_pipeline.py publishes these automatically when InfluxDB is reachable)
-python -m src.dashboard.publish_pipeline_metrics
-# Dashboards are code: edit build_dashboards.py, not the JSON
-python -m src.dashboard.grafana.build_dashboards
-```
-
-Three alert rules are provisioned: high risk at a station (latest risk
-above 0.7), no readings for 5 minutes, and the bridge dropping payloads or
-failing writes. Point them at your own contact point in Grafana → Alerting.
-
-Security defaults:
-
-- Every credential is read from `.env`, never from the repo.
-- MQTT is TLS-only: the broker listens on port 8883 with no plaintext
-  listener, and requires TLS 1.2 or newer (TLS 1.3 is negotiated in practice).
-  Clients trust only `certs/mqtt/ca.crt` and verify the broker's hostname.
-  The certificate covers `mosquitto`, `localhost` and `127.0.0.1`; add more
-  names with `MQTT_CERT_HOSTS="host1,10.0.0.5" bash scripts/gen_mqtt_certs.sh --force`.
-  Keep `certs/mqtt/ca.key` private. The `certs/` folder is excluded from git
-  and from the Docker image.
-- MQTT also requires a username and password, with ACLs limiting access to `crop/#`.
-- The bridge writes with a write-only InfluxDB token, and Grafana reads with a read-only one.
-- The API requires `X-API-Key`. For local development only, set `API_ALLOW_UNAUTHENTICATED=true`.
-
-## API
-
-The API takes **raw band reflectances**: exactly `seq_len` rows (5 for the
-current model) of 6 values in [0, 1], in band order `red_edge_705,
-red_edge_740, red_edge_783, nir_842, swir_1610, swir_2190`. Models trained
-with context (`GET /info` → `"requires_context": true`, the default) also
-need the **acquisition date of every row** and the **field location**. The
-server computes the indices, the context channels and the scaling.
-
-```bash
-curl -X POST http://localhost:8000/predict \
-  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
-  -d '{"readings": [[0.08,0.13,0.15,0.18,0.20,0.11], ... 5 rows ...],
-       "dates": ["2023-06-01","2023-06-06","2023-06-11","2023-06-16","2023-06-21"],
-       "lat": 39.59, "lon": -74.69}'
-```
-
-`POST /predict/batch` takes `sequences` plus one `dates` list and one
-`lat` / `lon` per sequence. MQTT payloads carry `date` (the acquisition
-date) and `lat` / `lon`; a live sensor that omits `date` gets the date of
-its own timestamp.
-
-```json
-{
-  "predicted_label": 0,
-  "label_name": "Healthy",
-  "confidence": 0.93,
-  "risk_score": 0.05,
-  "probabilities": [0.93, 0.04, 0.03],
-  "status": "ok",
-  "out_of_distribution": false,
-  "model_type": "cnn_lstm_attention",
-  "inference_time_ms": 3.1
-}
-```
-
-The values above are illustrative.
-
-- **Probabilities and risk.** Probabilities are temperature-calibrated.
-  `risk_score` is the probability-weighted risk Σ pᵢ·wᵢ, with w = (0, 0.5, 1).
-- **`status`** is one of:
-  - `ok`
-  - `low_confidence`: confidence is below `LOW_CONFIDENCE_THRESHOLD`
-  - `out_of_distribution`: any standardized feature has |z| > 8 (this
-    includes a field far outside the training region)
-- **Other endpoints:**
-  - `POST /predict/batch`
-  - `GET /info`: model metadata, including `seq_len` and `requires_context`
-  - `GET /health`: 503 when no model is loaded
-  - `GET /metrics`: Prometheus
-- **Limits:** rate limiting, a body-size cap, a batch-size cap and CORS are
-  all configured by environment variables (see `src/api/main.py`).
-
-## Tests
-
-```bash
-pytest -m "not slow"          # fast tests: features, inference parity, API, streaming, QUBO, tuning
-pytest -m slow                # end-to-end pipeline + tuning on a small real fixture
-pytest --cov                  # coverage (CI requires >= 70%)
-ruff check .
-```
-
-The tests use a small fixture of real CDM + Sentinel-2 sequences
-(`tests/fixtures/`), so they need no network. The API tests run against a
-freshly trained model, and the parity test asserts that raw readings sent
-through the API path give the same probabilities as the offline path.
+---
 
 ## Project structure
 
 ```
-config/            non-secret INI settings, Mosquitto config + ACL
+config/            non-secret settings: MQTT, InfluxDB, Mosquitto config + ACL
 scripts/           gen_mqtt_certs.sh (MQTT TLS certificates)
 src/
   constants.py     bands, labels, risk weights (single source of truth)
-  config.py        INI + env loading, MQTT client factory
-  real_data/       CDM reports, Sentinel-2 extraction + QC, weak labels,
-                   EthCT2020 check, Vineyard UAV calibration, feature schema
-  data/            preprocessing (site-grouped splits), MQTT replay publisher
-  features/        vegetation indices (array/DataFrame, finite-checked)
-  models/          LSTM, CNN-LSTM(-Attention), RF/XGBoost + CV, model factory
-  training/        training loop, grouped-CV tuning, calibration, checkpoints
-  inference/       feature pipeline + predictor (used by API, bridge, pipeline)
+  config.py        INI + env loading, MQTT/TLS client factory
+  real_data/       CDM, Sentinel-2 + QC, weak labels, EthCT2020, Vineyard, Septoria
+  data/            preprocessing (site-grouped split), MQTT replay publisher
+  features/        vegetation indices, date/location context channels
+  models/          LSTM, CNN-LSTM(-Attention), RF/XGBoost, model factory
+  training/        training loop, calibration, grouped-CV tuning
+  inference/       feature pipeline + predictor (used everywhere)
   evaluation/      metrics, bootstrap CIs, McNemar, plots
   quantum/         QUBO formulation, solvers, baseline comparison
-  geospatial/      risk GeoDataFrames, metric zone grid, Folium maps
+  geospatial/      risk GeoDataFrames, zone grid, Folium maps
   api/             FastAPI service
-  dashboard/       MQTT→InfluxDB bridge, InfluxDB setup, history backfill,
-                   pipeline-metrics export, Grafana dashboards-as-code
-run_pipeline.py    end-to-end training + evaluation
-requirements.txt   all dependencies (runtime, real data, QAOA, tests, lint)
+  dashboard/       MQTT→InfluxDB bridge, setup, backfill, metrics export, Grafana as code
 tests/             pytest suite + real-data fixtures
+run_pipeline.py    end-to-end training + evaluation
+docker-compose.yml InfluxDB, Grafana, Mosquitto (+ API, bridge, publisher with --profile app)
 ```
+
+Generated folders (not in git): `data/`, `models/checkpoints/`, `reports/`, `certs/`.
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `influxdb_setup` → **401 Unauthorized** | InfluxDB kept the token from its first start. Put that token in `.env` (`docker exec crop-influxdb influx auth list`), or reset it: `docker compose down`, then `docker volume rm crop_influxdb_data crop_influxdb_config`, then `docker compose up -d` |
+| Grafana **"invalid username or password"** | Grafana kept the password from its first start. Run `docker exec crop-grafana grafana cli admin reset-admin-password <password from .env>` |
+| `crop-bridge` keeps **restarting**, or the API is **unhealthy** | The app image is older than the code. Run `docker compose --profile app up -d --build` |
+| Dashboards show **no data** | Check `docker logs crop-bridge`, and that the tokens in `.env` are correct. Then rerun step 5 |
+| Mosquitto exits with **missing certificates** | Run `bash scripts/gen_mqtt_certs.sh` |
+| Septoria download stops | The server is slow and unstable. Rerun the same command; finished images are cached |

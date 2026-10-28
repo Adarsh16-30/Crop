@@ -199,7 +199,8 @@ class TestPipelineMetrics:
 
         pd.DataFrame([{'Model': 'X', 'n_test': 1, 'accuracy': 1.0, 'f1_macro': 1.0}]).to_csv(
             tmp_path / 'model_comparison.csv', index=False)
-        pd.DataFrame([{'sample_id': i, 'split': 'test', 'prob_class_0': .2,
+        pd.DataFrame([{'sample_id': f'S+152344_-451818_2024081{i}_20240623',
+                       'split': 'test', 'prob_class_0': .2,
                        'prob_class_1': .4, 'prob_class_2': .4, 'true_label': 1,
                        'predicted_label': 1, 'confidence': .4, 'lat': 1.0, 'lon': 2.0,
                        'model': 'lstm'} for i in range(3)]).to_csv(
@@ -209,6 +210,9 @@ class TestPipelineMetrics:
         assert len(points) == 3
         assert len({p._time for p in points}) == 3  # distinct -> no overwrite
         np.testing.assert_allclose([p._fields['risk_score'] for p in points], 0.6)
+        # real sample ids are site/date strings, kept as-is
+        assert sorted(p._fields['sample_id'] for p in points) == [
+            f'S+152344_-451818_2024081{i}_20240623' for i in range(3)]
 
     def test_missing_reports_is_a_clear_error(self, tmp_path):
         from src.dashboard.publish_pipeline_metrics import build_points

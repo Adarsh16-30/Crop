@@ -126,7 +126,7 @@ def build_points(reports_dir: str = 'reports', processed_dir: str = 'data/proces
             when = run_time - timedelta(milliseconds=i)
             points.append(_point(
                 'batch_risk', {**base, 'split': row.split, 'model': row.model},
-                {'sample_id': int(row.sample_id), 'latitude': float(row.lat),
+                {'sample_id': str(row.sample_id), 'latitude': float(row.lat),
                  'longitude': float(row.lon), 'risk_score': float(risk),
                  'predicted_label': int(row.predicted_label),
                  'true_label': int(row.true_label), 'confidence': float(row.confidence),
